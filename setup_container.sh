@@ -83,7 +83,7 @@ case "$1" in
         remove_container
         ;;
     *)
-        echo "Użycie: $0 {create|remove}"
+        echo "Usage: $0 {create|remove}"
         exit 1
         ;;
 esac
