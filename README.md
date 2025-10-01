@@ -5,12 +5,21 @@ This bash script, setup_container.sh, serves as an educational example of how to
 This project is designed to help you understand the core principles behind containerization platforms like Docker. By manually creating a container with basic Linux commands, you'll gain insight into how Docker isolates processes, manages resources, and bundles filesystems. Instead of the "magic" of a single docker run command, you'll see how various components—like cgroups for resource limits and unshare for process isolation—work together to create a contained environment.
 
 ## Usage Instructions  
+
 To properly run the container and its network, you must follow the steps below in two separate terminals.
 
-**Terminal 1: Starting the Container**  
-Run the container using the setup_container.sh script. This script will create the container's environment and start the main process.
+### Prerequisites
+
+* A Linux operating system (assuming cgroups v2).
+* Administrative privileges (`sudo`).
+* Required tools: **curl**, **jq** (for image manifest parsing), **tar**, **unshare**, **iproute2**, **iptables**.
+
+### Terminal 1: Starting the Container and its Process
+
+Run the container using the `setup_container.sh` script. You must specify the image, e.g., `alpine:latest`. This script will download the image, create the environment, and start the main process, which will drop you into a shell (`/bin/sh`).
+
 ```bash
-sudo ./setup_container.sh create
+sudo ./setup_container.sh create alpine:latest
 ```
 After the container starts, the script will display the process PID. At this stage, keep this terminal open as you are entering the container in its namespace.
 

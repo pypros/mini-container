@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Define constant variables
-CONTAINER_ROOT="./my_alpine_root"
+CONTAINER_ROOT="./my_image_root"
 BRIDGE_NAME="mybr0"
 CONTAINER_NETWORK="172.19.0.0/16"
 BRIDGE_IP="172.19.0.1/16"
