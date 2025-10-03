@@ -1,19 +1,18 @@
-# Fetched content for uploaded:container_manager.py
 import subprocess
 import os
 import signal
 import time
 import sys
-import shutil # Native, for deleting directories
-import json     # Native, for parsing JSON
-import urllib.request # Native, replaces requests
+import shutil
+import json
+import urllib.request
 from typing import List, Optional
 from pathlib import Path
 import http.client
 import urllib.parse
 import tarfile
 import ssl
-
+import argparse
 
 # --- GLOBAL CONFIGURATION ---
 CONTAINER_ROOT = "./my_image_root"
@@ -36,31 +35,8 @@ BUILD_TEMP_DIR = ".docker_temp"
 IMAGE_LAYERS_DIR = "./image_layers"
 COMPOSE_DIR = "./docker_image_compose" 
 
-# INIT CMD - Script executed as PID 1 in the container
-CONTAINER_INIT_CMD = f"""
-    # 1. Mount essential filesystems
-    mount -t proc proc /proc;
-    mount -t sysfs sys /sys;
-    hostname "my-pid1-container";
 
-    # 2. Wait for Host to configure network (Handshake)
-    echo "PID 1 (Init Script) waiting for network configuration from Host...";
-    while [ ! -f /{NETWORK_READY_FLAG} ]; do sleep 0.1; done;
-
-    # 3. Clean up the flag
-    rm -f /{NETWORK_READY_FLAG};
-
-    # 4. Final step: Replace this process with the target shell
-    # Set up basic environment variables
-    export HOME=/root
-    export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-    export TERM=xterm
-    
-    # 5. Execute the shell
-    exec /bin/sh -i;
-"""
-
-def run_cmd(cmd: List[str], pipe_output: bool = False, input_data: Optional[str] = None, check_error: bool = True, ignore_stderr: bool = False) -> Optional[str]:
+def run_cmd_host(cmd: List[str], pipe_output: bool = False, input_data: Optional[str] = None, check_error: bool = True, ignore_stderr: bool = False) -> Optional[str]:
     """Helper function to execute shell commands using subprocess."""
     try:
         if input_data:
@@ -98,11 +74,33 @@ def run_cmd(cmd: List[str], pipe_output: bool = False, input_data: Optional[str]
         print(f"Error: Command not found: {cmd[0]}")
         sys.exit(1)
 
-# --- CLEANUP AND HELPER FUNCTIONS ---
+
+def run_cmd_on_container(container_pid: int, cmd: str) -> Optional[str]:
+    """
+    Executes a shell command or a multi-command string inside the container's 
+    isolated namespaces (mount, net, uts) using nsenter.
+    
+    Args:
+        container_pid (int): The PID of the container's main process (PID 1).
+        cmd (str): The shell command string to execute (e.g., 'ip addr show').
+        
+    Returns:
+        Optional[str]: The command output if piped, otherwise None.
+    """
+    # Build the nsenter command. The actual command string is passed 
+    # to /bin/sh -c to allow multiple commands or complex strings to run.
+    nsenter_cmd = [
+        "nsenter", "-t", str(container_pid), "--mount", "--net", "--uts", f"--root={CONTAINER_ROOT}", 
+        "/bin/sh", "-c",
+        cmd # Pass the command string as the argument to /bin/sh -c
+    ]
+    
+    # Call the original run_cmd function. We set pipe_output=True for maximum
+    # utility, although network setup might not need it.
+    return run_cmd_host(nsenter_cmd, pipe_output=True, check_error=True)
 
 def cleanup_dirs():
     """Removes temporary directories using native Python functions (shutil.rmtree)."""
-    # Replaces run_cmd(["rm", "-rf", ...])
     for directory in [CONTAINER_ROOT, BUILD_TEMP_DIR, IMAGE_LAYERS_DIR, COMPOSE_DIR]:
         if os.path.isdir(directory):
             try:
@@ -131,25 +129,14 @@ def get_arch() -> str:
         "arm": "arm",
         "armv7l": "arm",
     }
-    uname_arch = run_cmd(["uname", "-m"], pipe_output=True)
+    uname_arch = run_cmd_host(["uname", "-m"], pipe_output=True)
     docker_arch = ARCHITECTURE_MAP.get(uname_arch, "amd64")
     if docker_arch == "amd64" and uname_arch not in ARCHITECTURE_MAP:
         print(f"WARNING: Unknown system architecture ({uname_arch}). Using default: amd64.")
     return docker_arch
 
-# --- CORE LOGIC FUNCTIONS ---
-class BearerRedirectHandler(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        # Call default redirect logic
-        new_req = urllib.request.HTTPRedirectHandler.redirect_request(self, req, fp, code, msg, headers, newurl)
-        
-        # If a new request was created and the old request had an Authorization header
-        if new_req and 'Authorization' in req.headers:
-            # Add the Authorization header back to the new request
-            new_req.add_header('Authorization', req.headers['Authorization'])
-        return new_req
 
-def download_image(full_arg: str):
+def download_image(full_image_arg: str):
     """
     Downloads a Docker image (v2 Registry API) using proven logic from the 
     DockerPuller class (manual redirect handling and token removal for S3).
@@ -157,12 +144,9 @@ def download_image(full_arg: str):
     Preserves the functionality of the old download_image (downloads, creates tar, extracts RootFS).
     
     Args:
-        full_arg (str): Image name with tag, e.g., 'alpine:latest'.
+        full_image_arg (str): Image name with tag, e.g., 'alpine:latest'.
     """
-    # --- Local state (replaces self from the class) ---
-    full_image_arg = full_arg
-    
-    # Use global constants from container_manager.py
+
     build_temp_dir = BUILD_TEMP_DIR
     container_root = CONTAINER_ROOT
     image_layers_dir = IMAGE_LAYERS_DIR
@@ -194,7 +178,7 @@ def download_image(full_arg: str):
             image = image_part
         
         simple_tag = f"{image_part}:{tag}"
-        print(f"--- 🛠️ Starting manual pull of image {image}:{tag} ({architecture}) using pure Python ---")
+        print(f"--- Starting manual pull of image {image}:{tag} ({architecture}) using pure Python ---")
 
     def _make_request(host, url, method="GET", headers={}, save_path=None):
         """
@@ -239,7 +223,6 @@ def download_image(full_arg: str):
                     conn.close()
                     continue
                 
-                # Handling success (Status 200)
                 if response.status == 200:
                     if save_path:
                         with open(save_path, 'wb') as f:
@@ -249,7 +232,6 @@ def download_image(full_arg: str):
                         data = response.read().decode('utf-8')
                         return data, 200
                 else:
-                    # Handling other errors
                     error_data = response.read().decode('utf-8', errors='ignore')
                     print(f"ERROR: HTTP Status {response.status} for {current_host}{current_path}")
                     return error_data, response.status
@@ -448,7 +430,7 @@ def download_image(full_arg: str):
 
 
     def _cleanup():
-        print("-" * 50)
+        
         # We remove the local temporary directories created within this function
         shutil.rmtree(compose_dir, ignore_errors=True)
         
@@ -469,21 +451,15 @@ def download_image(full_arg: str):
     try:
         _parse_image_arg()
         os.makedirs(build_temp_dir, exist_ok=True) # Creating the main temp directory
-        
+
         _step1_get_authorization_token()
-        print("-" * 50)
         _step2_3_get_manifest_list_and_digest()
-        print("-" * 50)
         _step4_download_manifest()
-        print("-" * 50)
         _step5_download_layers()
-        print("-" * 50)
         _step6_download_config()
-        print("-" * 50)
         _step7_assemble_tar_archive()
-        print("-" * 50)
         _step8_extract_rootfs()
-        print("-" * 50)
+
         _cleanup()
 
     except Exception as e:
@@ -507,30 +483,30 @@ def setup_network(container_pid: int):
     # 1. IP Forwarding (1 call)
     print("1/8: Enabling IP Forwarding...")
     IP_FORWARD_PATH = '/proc/sys/net/ipv4/ip_forward'
-    run_cmd(["echo","1", ">", IP_FORWARD_PATH])
+    run_cmd_host(["echo","1", ">", IP_FORWARD_PATH])
 
     # 2. Creating and configuring Bridge (1 call - only adding the link)
     print("2/8: Creating Bridge and assigning IP...")
-    run_cmd(["ip", "link", "add", "name", BRIDGE_NAME, "type", "bridge"], ignore_stderr=True, check_error=False) 
-    run_cmd(["ip", "link", "set", BRIDGE_NAME, "up"])
-    run_cmd(["ip", "addr", "add", BRIDGE_IP, "dev", BRIDGE_NAME], check_error=False, ignore_stderr=True)
+    run_cmd_host(["ip", "link", "add", "name", BRIDGE_NAME, "type", "bridge"], ignore_stderr=True, check_error=False) 
+    run_cmd_host(["ip", "link", "set", BRIDGE_NAME, "up"])
+    run_cmd_host(["ip", "addr", "add", BRIDGE_IP, "dev", BRIDGE_NAME], check_error=False, ignore_stderr=True)
 
 
     # 3. Creating VETH (1 call)
     print("3/8: Creating VETH pair...")
-    run_cmd(["ip", "link", "add", "name", veth_host, "type", "veth", "peer", "name", veth_guest])
-    run_cmd(["ip", "link", "set", veth_host, "master", BRIDGE_NAME])
-    run_cmd(["ip", "link", "set", veth_host, "up"])
+    run_cmd_host(["ip", "link", "add", "name", veth_host, "type", "veth", "peer", "name", veth_guest])
+    run_cmd_host(["ip", "link", "set", veth_host, "master", BRIDGE_NAME])
+    run_cmd_host(["ip", "link", "set", veth_host, "up"])
     
     # 4. Moving VETH to Namespaces (1 call)
     print("4/8: Moving VETH to namespace...")
-    run_cmd(["ip", "link", "set", veth_guest, "netns", str(container_pid)])
+    run_cmd_host(["ip", "link", "set", veth_guest, "netns", str(container_pid)])
 
     # 5. Configuring NAT and FORWARD (3 iptables commands)
     print("5/8: Configuring NAT (iptables)...")
-    run_cmd(["iptables", "-w", "-t", "nat", "-I", "POSTROUTING", "1", "-s", CONTAINER_NETWORK, "-o", HOST_INTERFACE, "-j", "MASQUERADE"])
-    run_cmd(["iptables", "-w", "-I", "FORWARD", "1", "-i", BRIDGE_NAME, "-o", HOST_INTERFACE, "-j", "ACCEPT"])
-    run_cmd(["iptables", "-w", "-I", "FORWARD", "1", "-i", HOST_INTERFACE, "-o", BRIDGE_NAME, "-m", "state", "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT"])
+    run_cmd_host(["iptables", "-w", "-t", "nat", "-I", "POSTROUTING", "1", "-s", CONTAINER_NETWORK, "-o", HOST_INTERFACE, "-j", "MASQUERADE"])
+    run_cmd_host(["iptables", "-w", "-I", "FORWARD", "1", "-i", BRIDGE_NAME, "-o", HOST_INTERFACE, "-j", "ACCEPT"])
+    run_cmd_host(["iptables", "-w", "-I", "FORWARD", "1", "-i", HOST_INTERFACE, "-o", BRIDGE_NAME, "-m", "state", "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT"])
 
     # 6. Writing resolv.conf (1 call)
     print("6/8: Writing resolv.conf...")
@@ -547,16 +523,15 @@ def setup_network(container_pid: int):
 
     # 7. Configuration inside Namespaces (1 'nsenter' call)
     print("7/8: Configuring network inside container...")
-    run_cmd([
-        "nsenter", "-t", str(container_pid), "--mount", "--net", "--uts", f"--root={CONTAINER_ROOT}", 
-        "/bin/sh", "-c",
+    run_cmd_on_container(
+        container_pid,
         f"""
             ip link set lo up && \
             ip link set {veth_guest} up && \
             ip addr add {CONTAINER_IP} dev {veth_guest} && \
             ip route add default via {gateway_ip};
         """
-    ])
+    )
     
     print("--- NETWORK CONFIGURATION COMPLETE ---")
 
@@ -571,14 +546,14 @@ def remove_network_config():
     ]
     for rule in delete_rules:
         for _ in range(3):
-            run_cmd(rule, check_error=False, ignore_stderr=True)
+            run_cmd_host(rule, check_error=False, ignore_stderr=True)
     print("PASS: Iptables rules removed.")
 
-    if run_cmd(["ip", "link", "show", BRIDGE_NAME], check_error=False, pipe_output=True):
+    if run_cmd_host(["ip", "link", "show", BRIDGE_NAME], check_error=False, pipe_output=True):
         print(f"2. Removing bridge {BRIDGE_NAME}...")
-        run_cmd(["ip", "addr", "del", BRIDGE_IP, "dev", BRIDGE_NAME], check_error=False, ignore_stderr=True)
-        run_cmd(["ip", "link", "set", BRIDGE_NAME, "down"], check_error=False, ignore_stderr=True)
-        run_cmd(["ip", "link", "del", BRIDGE_NAME], check_error=False, ignore_stderr=True)
+        run_cmd_host(["ip", "addr", "del", BRIDGE_IP, "dev", BRIDGE_NAME], check_error=False, ignore_stderr=True)
+        run_cmd_host(["ip", "link", "set", BRIDGE_NAME, "down"], check_error=False, ignore_stderr=True)
+        run_cmd_host(["ip", "link", "del", BRIDGE_NAME], check_error=False, ignore_stderr=True)
         print("PASS: Bridge removed.")
     else:
         print("INFO: Bridge does not exist, skipping deletion.")
@@ -598,51 +573,27 @@ def cleanup_container(container_pid: int, image_arg: str):
     
     # 2. Clean up lingering VETH interfaces
     print("2. Removing lingering host VETH interfaces...")
-    veth_list_raw = run_cmd(["ip", "link", "show"], pipe_output=True, check_error=False)
+    veth_list_raw = run_cmd_host(["ip", "link", "show"], pipe_output=True, check_error=False)
     if veth_list_raw:
         # Search for lines starting with h[digit]@
         import re
         veth_matches = re.findall(r'(\bh\d+@if\d+):', veth_list_raw)
         for veth_match in veth_matches:
             iface_name = veth_match.split('@')[0]
-            run_cmd(["ip", "link", "del", iface_name], check_error=False, ignore_stderr=True)
+            run_cmd_host(["ip", "link", "del", iface_name], check_error=False, ignore_stderr=True)
     print("PASS: VETH interfaces checked/removed.")
 
     # 3. Unmount and remove rootfs
     print(f"3. Removing container root filesystem: {CONTAINER_ROOT}")
-    run_cmd(["umount", f"{CONTAINER_ROOT}/dev"], check_error=False, ignore_stderr=True)
-    run_cmd(["umount", f"{CONTAINER_ROOT}/proc"], check_error=False, ignore_stderr=True)
-    run_cmd(["umount", f"{CONTAINER_ROOT}/sys"], check_error=False, ignore_stderr=True)
+    run_cmd_host(["umount", f"{CONTAINER_ROOT}/dev"], check_error=False, ignore_stderr=True)
+    run_cmd_host(["umount", f"{CONTAINER_ROOT}/proc"], check_error=False, ignore_stderr=True)
+    run_cmd_host(["umount", f"{CONTAINER_ROOT}/sys"], check_error=False, ignore_stderr=True)
 
-    if os.path.isdir(CONTAINER_ROOT):
-        try:
-            # 🔥 Native and safe directory and content removal 🔥
-            shutil.rmtree(CONTAINER_ROOT)
-            print("PASS: Root filesystem removed (shutil.rmtree).")
-        except Exception as e:
-            print(f"ERROR: Error while removing RootFS: {e}") # Błąd podczas usuwania RootFS
-
+    shutil.rmtree(CONTAINER_ROOT, ignore_errors=True)
     print("PASS: Root filesystem removed.")
 
-
-    # 4. Remove cgroup directory
-    if os.path.isdir(CGROUP_PATH):
-        print(f"4. Removing cgroup directory: {CGROUP_PATH}")
-        
-        try:
-            # Attempt to remove using os.rmdir()
-            # This will only succeed IF the kernel has released all resources in CGROUP_PATH
-            os.rmdir(CGROUP_PATH) 
-            print("PASS: Cgroup directory removed.")
-            
-        except OSError as e:
-            # Catch error if the directory is not empty or permission denied
-            print(f"ERROR: Failed to remove cgroup directory {CGROUP_PATH}.")
-            print(f"   Details: {e.strerror}. ")
-            print("   WARNING: This may mean that container processes are still active or resources have not been released.") # Może to oznaczać...
-
-    else:
-        print(f"4. Cgroup directory {CGROUP_PATH} does not exist. Skipping cleanup.") # nie istnieje. Pomijam czyszczenie.
+    # 4. Remove cgroup director
+    shutil.rmtree(CGROUP_PATH, ignore_errors=True)
         
     # 5. Remove temporary build files (NEW)
     print("5. Removing temporary build artifacts...")
@@ -660,7 +611,6 @@ def cleanup_container(container_pid: int, image_arg: str):
     
     print("--- CONTAINER ARTIFACTS CLEANUP COMPLETE ---")
 
-# --- MAIN ORCHESTRATION ---
 
 def main_create(image_arg: str):
     """Main function to create and run the container with PID 1 as /bin/sh."""
@@ -671,7 +621,7 @@ def main_create(image_arg: str):
     # 2. Cgroups configuration
     print("\n2. Configuring cgroups and mounting /dev...")
     # Attempt to mount cgroup2, ignoring errors if already mounted
-    run_cmd(["mount", "-t", "cgroup2", "none", "/sys/fs/cgroup"], check_error=False, ignore_stderr=True)
+    run_cmd_host(["mount", "-t", "cgroup2", "none", "/sys/fs/cgroup"], check_error=False, ignore_stderr=True)
     cgroup_path_obj = Path(CGROUP_PATH)
     cgroup_path_obj.mkdir(parents=True, exist_ok=True)
     memory_path = Path(CGROUP_PATH) / 'memory.max'
@@ -693,11 +643,35 @@ def main_create(image_arg: str):
         print(f"ERROR: Failed to set CPU limit: {e.strerror}. (Required permissions?)") # Wymagane uprawnienia?
 
 
-    run_cmd(["mount", "-t", "devtmpfs", "none", f"{CONTAINER_ROOT}/dev"])
+    run_cmd_host(["mount", "-t", "devtmpfs", "none", f"{CONTAINER_ROOT}/dev"])
     print("PASS: Cgroups configured.")
 
     # 3. Launch the container process (Init Script)
     print("\n3. Launching Init Script (PID 1) in the isolated environment...")
+
+    # Script executed as PID 1 in the container
+    CONTAINER_INIT_CMD = f"""
+        # 1. Mount essential filesystems
+        mount -t proc proc /proc;
+        mount -t sysfs sys /sys;
+        hostname "my-pid1-container";
+
+        # 2. Wait for Host to configure network (Handshake)
+        echo "PID 1 (Init Script) waiting for network configuration from Host...";
+        while [ ! -f /{NETWORK_READY_FLAG} ]; do sleep 0.1; done;
+
+        # 3. Clean up the flag
+        rm -f /{NETWORK_READY_FLAG};
+
+        # 4. Final step: Replace this process with the target shell
+        # Set up basic environment variables
+        export HOME=/root
+        export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+        export TERM=xterm
+        
+        # 5. Execute the shell
+        exec /bin/sh -i;
+    """
 
     unshare_cmd = [
         "unshare", "--uts", "--pid", "--net", "--mount", "--user", "--kill-child",
@@ -713,19 +687,15 @@ def main_create(image_arg: str):
     time.sleep(1) # Give time for startup and /proc mounting
 
     # Assign PID to Cgroup on the HOST
-    run_cmd(["sh", "-c", f"echo {unshare_pid} > {CGROUP_PATH}/cgroup.procs"])
+    run_cmd_host(["sh", "-c", f"echo {unshare_pid} > {CGROUP_PATH}/cgroup.procs"])
 
-    # 4. Configure Network and send handshake signal
     try:
-        # Network configuration (uses unshare_pid, which is PID 1)
         setup_network(unshare_pid)
 
-        # Handshake: Create the file signaling network readiness
         print("\n4. Network ready. Sending Handshake signal to PID 1...")
-        run_cmd(["rm", "-f", f"{CONTAINER_ROOT}/{NETWORK_READY_FLAG}"], check_error=False, ignore_stderr=True)
-        run_cmd(["touch", f"{CONTAINER_ROOT}/{NETWORK_READY_FLAG}"])
+        run_cmd_host(["rm", "-f", f"{CONTAINER_ROOT}/{NETWORK_READY_FLAG}"], check_error=False, ignore_stderr=True)
+        run_cmd_host(["touch", f"{CONTAINER_ROOT}/{NETWORK_READY_FLAG}"])
 
-        # 5. Wait for exit (exiting from /bin/sh)
         print("\n5. Entering interactive shell (PID 1 is now /bin/sh. Type 'exit' to quit)...")
         unshare_proc.wait() 
 
@@ -738,25 +708,21 @@ def main_create(image_arg: str):
         except:
             pass
     finally:
-        # 6. Cleanup upon exit
         print("\n6. Initiating cleanup...")
         remove_network_config()
         cleanup_container(unshare_pid, image_arg)
         print("Container management process finished.")
-
-
-# --- CLEANUP (REMOVE) FUNCTION ---
 
 def main_remove(image_arg: str):
     """Main function to remove all resources."""
 
     unshare_pid = 0
     # Search for the PID of the running interactive shell process
-    pid_list_raw = run_cmd(["pgrep", "-f", "/bin/sh -i"], pipe_output=True, check_error=False)
+    pid_list_raw = run_cmd_host(["pgrep", "-f", "/bin/sh -i"], pipe_output=True, check_error=False)
     if pid_list_raw:
         init_pid = pid_list_raw.split()[0]
         # Ppid of PID 1 in the new namespace is the unshare_pid
-        unshare_pid_raw = run_cmd(["ps", "-o", "ppid=", "-p", init_pid], pipe_output=True, check_error=False)
+        unshare_pid_raw = run_cmd_host(["ps", "-o", "ppid=", "-p", init_pid], pipe_output=True, check_error=False)
         if unshare_pid_raw:
              unshare_pid = int(unshare_pid_raw.strip())
         else:
@@ -766,20 +732,59 @@ def main_remove(image_arg: str):
     cleanup_container(unshare_pid, image_arg)
     print("Full resource cleanup complete.")
 
+def parse_args():
+    """
+    Parses command-line arguments using argparse for 'run' and 'rm' actions.
+    """
+    parser = argparse.ArgumentParser(
+        description="A simple container manager.",
+        epilog="Example usage: sudo python3 container_manager.py run -it ubuntu:latest"
+    )
+    
+    subparsers = parser.add_subparsers(
+        dest="command", 
+        required=True,
+        help="The container action to perform."
+    )
 
-# --- SCRIPT ENTRY POINT ---
+    run_parser = subparsers.add_parser(
+        "run", 
+        help="Run a command in a new container."
+    )
+    
+    # Adding the '-it' flags (which are currently implied by main_create)
+    # We add them here for compatibility, but don't need to check their value since the script always runs interactively.
+    run_parser.add_argument(
+        "-it", 
+        action="store_true", 
+        help="Run container interactively (currently mandatory, included for Docker compatibility)."
+    )
+    
+    run_parser.add_argument(
+        "image_arg", 
+        nargs='?', 
+        default="alpine:latest", 
+        help="The image name and tag (e.g., alpine:latest). Defaults to alpine:latest."
+    )
+
+    rm_parser = subparsers.add_parser(
+        "rm", 
+        help="Remove all global and container-specific resources."
+    )
+    rm_parser.add_argument(
+        "image_arg", 
+        nargs='?', 
+        default="alpine:latest", 
+        help="The image name used during creation (for cleaning up the .tar file). Defaults to alpine:latest."
+    )
+
+    return parser.parse_args()
+
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: sudo python3 container_manager.py {create|remove} [IMAGE_NAME:TAG]")
-        sys.exit(1)
 
-    command = sys.argv[1].lower()
-    image_arg = sys.argv[2] if len(sys.argv) > 2 else "alpine:latest"
-
-    if command == "create":
-        main_create(image_arg)
-    elif command == "remove":
-        main_remove(image_arg)
-    else:
-        print("Unknown command. Use 'create' or 'remove'.")
-        sys.exit(1)
+    args = parse_args()
+    
+    if args.command == "run":
+        main_create(args.image_arg)
+    elif args.command == "rm":
+        main_remove(args.image_arg)
