@@ -4,9 +4,9 @@ import os
 import signal
 import time
 import sys
-import shutil # Natywny, do usuwania katalogów
-import json     # Natywny, do parsowania JSON
-import urllib.request # Natywny, zastępuje requests
+import shutil # Native, for deleting directories
+import json     # Native, for parsing JSON
+import urllib.request # Native, replaces requests
 from typing import List, Optional
 from pathlib import Path
 import http.client
@@ -101,27 +101,27 @@ def run_cmd(cmd: List[str], pipe_output: bool = False, input_data: Optional[str]
 # --- CLEANUP AND HELPER FUNCTIONS ---
 
 def cleanup_dirs():
-    """Usuwa katalogi tymczasowe używając natywnych funkcji Pythona (shutil.rmtree)."""
-    # Zastępuje run_cmd(["rm", "-rf", ...])
+    """Removes temporary directories using native Python functions (shutil.rmtree)."""
+    # Replaces run_cmd(["rm", "-rf", ...])
     for directory in [CONTAINER_ROOT, BUILD_TEMP_DIR, IMAGE_LAYERS_DIR, COMPOSE_DIR]:
         if os.path.isdir(directory):
             try:
-                # Sprawdzamy, czy katalog nie jest katalogiem głównym lub '/'.
+                # We check if the directory is not the root directory or '/'.
                 if directory == '/' or directory == CONTAINER_ROOT:
-                    # Chcemy usuwać CONTAINER_ROOT tylko, gdy jest gotowy
+                    # We only want to delete CONTAINER_ROOT when it's ready
                     continue
                 shutil.rmtree(directory)
             except OSError as e:
-                print(f"Błąd czyszczenia katalogu {directory}: {e}")
+                print(f"Error cleaning directory {directory}: {e}") # Błąd czyszczenia katalogu
 
 def cleanup_download_artifacts():
-    """Usuwa katalogi tymczasowe po pobraniu i ekstrakcji obrazu."""
+    """Removes temporary directories after image download and extraction."""
     for directory in [BUILD_TEMP_DIR, IMAGE_LAYERS_DIR, COMPOSE_DIR]:
         if os.path.isdir(directory):
             try:
                 shutil.rmtree(directory)
             except OSError as e:
-                print(f"Błąd czyszczenia artefaktów pobierania {directory}: {e}")
+                print(f"Error cleaning download artifacts {directory}: {e}") # Błąd czyszczenia artefaktów pobierania
 
 def get_arch() -> str:
     """Determines system architecture for Docker manifest using a dictionary lookup."""
@@ -140,33 +140,33 @@ def get_arch() -> str:
 # --- CORE LOGIC FUNCTIONS ---
 class BearerRedirectHandler(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        # Wywołaj domyślną logikę przekierowania
+        # Call default redirect logic
         new_req = urllib.request.HTTPRedirectHandler.redirect_request(self, req, fp, code, msg, headers, newurl)
         
-        # Jeśli nowe żądanie zostało utworzone i stare żądanie miało nagłówek Authorization
+        # If a new request was created and the old request had an Authorization header
         if new_req and 'Authorization' in req.headers:
-            # Dodaj nagłówek Authorization z powrotem do nowego żądania
+            # Add the Authorization header back to the new request
             new_req.add_header('Authorization', req.headers['Authorization'])
         return new_req
 
 def download_image(full_arg: str):
     """
-    Pobiera obraz Dockerowy (v2 Registry API) używając sprawdzonej logiki z klasy 
-    DockerPuller (ręczna obsługa przekierowań i usuwanie tokena dla S3).
+    Downloads a Docker image (v2 Registry API) using proven logic from the 
+    DockerPuller class (manual redirect handling and token removal for S3).
     
-    Zachowuje funkcjonalność starego download_image (pobiera, tworzy tar, ekstrahuje RootFS).
+    Preserves the functionality of the old download_image (downloads, creates tar, extracts RootFS).
     
     Args:
-        full_arg (str): Nazwa obrazu z tagiem, np. 'alpine:latest'.
+        full_arg (str): Image name with tag, e.g., 'alpine:latest'.
     """
-    # --- Lokalny stan (zastępuje self z klasy) ---
+    # --- Local state (replaces self from the class) ---
     full_image_arg = full_arg
     
-    # Używamy globalnych stałych z container_manager.py
+    # Use global constants from container_manager.py
     build_temp_dir = BUILD_TEMP_DIR
     container_root = CONTAINER_ROOT
     image_layers_dir = IMAGE_LAYERS_DIR
-    compose_dir = os.path.join(BUILD_TEMP_DIR, "compose_temp") # Użyjemy temp/compose_temp
+    compose_dir = os.path.join(BUILD_TEMP_DIR, "compose_temp") # Will use temp/compose_temp
     
     image = ""
     tag = ""
@@ -198,8 +198,8 @@ def download_image(full_arg: str):
 
     def _make_request(host, url, method="GET", headers={}, save_path=None):
         """
-        Ogólna funkcja do wykonywania żądań HTTP/HTTPS z ręczną obsługą przekierowań (3xx).
-        Logika skopiowana z DockerPuller._make_request.
+        General function for performing HTTP/HTTPS requests with manual redirect handling (3xx).
+        Logic copied from DockerPuller._make_request.
         """
         MAX_REDIRECTS = 5
         redirect_count = 0
@@ -216,16 +216,16 @@ def download_image(full_arg: str):
                 context = ssl.create_default_context()
                 conn = http.client.HTTPSConnection(current_host, context=context)
 
-                # KLUCZOWA LOGIKA Z TWOJEJ KLASY: Usuwanie nagłówka Authorization po pierwszym przekierowaniu
+                # KEY LOGIC FROM YOUR CLASS: Removing the Authorization header after the first redirect
                 req_headers = headers.copy()
                 if redirect_count > 0 and 'Authorization' in req_headers:
-                    # Po przekierowaniu do serwera magazynującego (blobs) autoryzacja jest często wbudowana w link
+                    # After redirecting to the storage server (blobs), authorization is often built into the link
                     del req_headers['Authorization'] 
                 
                 conn.request(method, current_path, headers=req_headers)
                 response = conn.getresponse()
 
-                # Obsługa przekierowań (Status 3xx)
+                # Handling redirects (Status 3xx)
                 if response.status in (301, 302, 307, 308):
                     new_location = response.getheader('Location')
                     if not new_location:
@@ -239,7 +239,7 @@ def download_image(full_arg: str):
                     conn.close()
                     continue
                 
-                # Obsługa sukcesu (Status 200)
+                # Handling success (Status 200)
                 if response.status == 200:
                     if save_path:
                         with open(save_path, 'wb') as f:
@@ -249,7 +249,7 @@ def download_image(full_arg: str):
                         data = response.read().decode('utf-8')
                         return data, 200
                 else:
-                    # Obsługa pozostałych błędów
+                    # Handling other errors
                     error_data = response.read().decode('utf-8', errors='ignore')
                     print(f"ERROR: HTTP Status {response.status} for {current_host}{current_path}")
                     return error_data, response.status
@@ -325,14 +325,14 @@ def download_image(full_arg: str):
         if status != 200:
             raise Exception("Failed to download manifest.")
         
-        # Zapisanie manifestu do pliku, a następnie wczytanie (jak w DockerPuller)
+        # Saving the manifest to a file, then loading it (as in DockerPuller)
         with open(manifest_path, 'w') as f:
             f.write(response_data)
             
         manifest_data = json.loads(response_data)
         layer_digests = [layer['digest'] for layer in manifest_data.get('layers', [])]
         
-        # Opcjonalnie zapis listy digestów do pliku (jak w DockerPuller, dla porządku)
+        # Optionally saving the list of digests to a file (as in DockerPuller, for order)
         blobs_list_path = os.path.join(build_temp_dir, "blobs_list.txt")
         with open(blobs_list_path, 'w') as f:
             for dgst in layer_digests:
@@ -355,7 +355,7 @@ def download_image(full_arg: str):
             url = f"/v2/{image}/blobs/{blob_sum}"
             headers = {"Authorization": f"Bearer {token}"}
             
-            # Używamy _make_request, które obsługuje przekierowania i usuwa nagłówek
+            # Use _make_request, which handles redirects and removes the header
             result, status = _make_request(host, url, headers=headers, save_path=layer_path)
             if status == 200:
                 download_count += 1
@@ -373,7 +373,7 @@ def download_image(full_arg: str):
         url = f"/v2/{image}/blobs/{config_digest}"
         headers = {"Authorization": f"Bearer {token}"}
         
-        # Używamy _make_request, które obsługuje przekierowania i usuwa nagłówek
+        # Use _make_request, which handles redirects and removes the header
         result, status = _make_request(host, url, headers=headers, save_path=config_output_path)
         if status != 200:
             raise Exception(f"Failed to download configuration file. Status: {status}")
@@ -384,12 +384,12 @@ def download_image(full_arg: str):
         print("7/8: Assembling the image into a .tar archive...")
         os.makedirs(compose_dir, exist_ok=True)
 
-        # 1. Przenieś plik konfiguracyjny (usuwamy go z build_temp_dir)
+        # 1. Move the configuration file (we remove it from build_temp_dir)
         shutil.move(config_output_path, os.path.join(compose_dir, config_filename_short))
 
         layer_paths_for_manifest = []
 
-        # 2. Skopiuj i zmień nazwy warstw dla potrzeb archiwum
+        # 2. Copy and rename layers for the archive
         for blob_sum in layer_digests:
             hash_part = blob_sum.split(':', 1)[1]
             
@@ -397,14 +397,14 @@ def download_image(full_arg: str):
             compose_tar_path = os.path.join(compose_dir, f"{hash_part}.tar")
             layer_paths_for_manifest.append(f"{hash_part}.tar")
             
-            # Kopia skompresowanego pliku, ale z nazwą *.tar
+            # Copy of the compressed file, but with a *.tar name
             shutil.copyfile(tar_gz_path, compose_tar_path)
             
-            # Dodaj plik VERSION (jak w DockerPuller)
+            # Add the VERSION file (as in DockerPuller)
             with open(os.path.join(compose_dir, f"{hash_part}.tar.version"), 'w') as f:
                 f.write("1.0\n")
 
-        # 3. Utwórz manifest.json
+        # 3. Create manifest.json
         layer_paths_json = ", ".join([f'"{h}"' for h in layer_paths_for_manifest])
         catalog_manifest = f"""[ {{
             "Config": "{config_filename_short}",
@@ -415,7 +415,7 @@ def download_image(full_arg: str):
         with open(os.path.join(compose_dir, "manifest.json"), 'w') as f:
             f.write(catalog_manifest)
 
-        # 4. Pakowanie do archiwum
+        # 4. Packaging into an archive
         final_tar_name = f"{full_image_arg.replace('/', '_').replace(':', '_')}_loaded.tar"
         
         with tarfile.open(final_tar_name, "w") as tar:
@@ -438,7 +438,7 @@ def download_image(full_arg: str):
             
             print(f"   -> Extracting layer: {hash_part[:10]}...")
 
-            # Użycie modułu tarfile do dekompresji i ekstrakcji (jak w DockerPuller)
+            # Using the tarfile module for decompression and extraction (as in DockerPuller)
             with tarfile.open(layer_tar_gz, "r:gz") as tar:
                 tar.extractall(path=container_root) 
             
@@ -449,10 +449,10 @@ def download_image(full_arg: str):
 
     def _cleanup():
         print("-" * 50)
-        # Usuwamy lokalne katalogi tymczasowe stworzone wewnątrz tej funkcji
+        # We remove the local temporary directories created within this function
         shutil.rmtree(compose_dir, ignore_errors=True)
         
-        # Wywołujemy funkcję globalną, aby usunąć katalogi globalne (BUILD_TEMP_DIR, IMAGE_LAYERS_DIR)
+        # We call the global function to remove global directories (BUILD_TEMP_DIR, IMAGE_LAYERS_DIR)
         cleanup_download_artifacts() 
         
         print("Temporary build files cleaned up.")
@@ -465,10 +465,10 @@ def download_image(full_arg: str):
              print("Image archive for 'docker load' was not created due to an earlier error.")
 
 
-    # --- Główna sekwencja (Zastępuje pull_image) ---
+    # --- Main sequence (Replaces pull_image) ---
     try:
         _parse_image_arg()
-        os.makedirs(build_temp_dir, exist_ok=True) # Tworzenie głównego katalogu temp
+        os.makedirs(build_temp_dir, exist_ok=True) # Creating the main temp directory
         
         _step1_get_authorization_token()
         print("-" * 50)
@@ -502,38 +502,37 @@ def setup_network(container_pid: int):
     veth_guest = f"c{container_pid}"
     gateway_ip = BRIDGE_IP.split('/')[0]
 
-    # Zoptymalizowana konfiguracja na hoście
+    # Optimized configuration on the host
 
-    # 1. IP Forwarding (1 wywołanie)
+    # 1. IP Forwarding (1 call)
     print("1/8: Enabling IP Forwarding...")
     IP_FORWARD_PATH = '/proc/sys/net/ipv4/ip_forward'
     run_cmd(["echo","1", ">", IP_FORWARD_PATH])
 
-    # 2. Tworzenie i konfiguracja Bridge (1 wywołanie - tylko dodanie linku)
+    # 2. Creating and configuring Bridge (1 call - only adding the link)
     print("2/8: Creating Bridge and assigning IP...")
     run_cmd(["ip", "link", "add", "name", BRIDGE_NAME, "type", "bridge"], ignore_stderr=True, check_error=False) 
     run_cmd(["ip", "link", "set", BRIDGE_NAME, "up"])
     run_cmd(["ip", "addr", "add", BRIDGE_IP, "dev", BRIDGE_NAME], check_error=False, ignore_stderr=True)
 
 
-    # 3. Tworzenie VETH (1 wywołanie)
+    # 3. Creating VETH (1 call)
     print("3/8: Creating VETH pair...")
     run_cmd(["ip", "link", "add", "name", veth_host, "type", "veth", "peer", "name", veth_guest])
     run_cmd(["ip", "link", "set", veth_host, "master", BRIDGE_NAME])
     run_cmd(["ip", "link", "set", veth_host, "up"])
     
-    # 4. Przeniesienie VETH do Namespaces (1 wywołanie)
+    # 4. Moving VETH to Namespaces (1 call)
     print("4/8: Moving VETH to namespace...")
     run_cmd(["ip", "link", "set", veth_guest, "netns", str(container_pid)])
 
-    # 5. Konfiguracja NAT i FORWARD (1 wywołanie 'sh -c' grupujące 3 polecenia iptables)
+    # 5. Configuring NAT and FORWARD (3 iptables commands)
     print("5/8: Configuring NAT (iptables)...")
-    # 🔥 POPRAWKA: Usunięcie nawiasów klamrowych {}
     run_cmd(["iptables", "-w", "-t", "nat", "-I", "POSTROUTING", "1", "-s", CONTAINER_NETWORK, "-o", HOST_INTERFACE, "-j", "MASQUERADE"])
     run_cmd(["iptables", "-w", "-I", "FORWARD", "1", "-i", BRIDGE_NAME, "-o", HOST_INTERFACE, "-j", "ACCEPT"])
     run_cmd(["iptables", "-w", "-I", "FORWARD", "1", "-i", HOST_INTERFACE, "-o", BRIDGE_NAME, "-m", "state", "--state", "RELATED,ESTABLISHED", "-j", "ACCEPT"])
 
-    # 6. Zapis resolv.conf (1 wywołanie)
+    # 6. Writing resolv.conf (1 call)
     print("6/8: Writing resolv.conf...")
     RESOLV_CONF_CONTENT = ("nameserver 8.8.8.8\n" "nameserver 1.1.1.1\n")
     try:
@@ -546,7 +545,7 @@ def setup_network(container_pid: int):
         sys.exit(1)
 
 
-    # 7. Konfiguracja wewnątrz Namespaces (1 wywołanie 'nsenter')
+    # 7. Configuration inside Namespaces (1 'nsenter' call)
     print("7/8: Configuring network inside container...")
     run_cmd([
         "nsenter", "-t", str(container_pid), "--mount", "--net", "--uts", f"--root={CONTAINER_ROOT}", 
@@ -617,14 +616,13 @@ def cleanup_container(container_pid: int, image_arg: str):
 
     if os.path.isdir(CONTAINER_ROOT):
         try:
-            # 🔥 Natywne i bezpieczne usuwanie katalogu i zawartości 🔥
+            # 🔥 Native and safe directory and content removal 🔥
             shutil.rmtree(CONTAINER_ROOT)
-            print("PASS: Root filesystem usunięty (shutil.rmtree).")
+            print("PASS: Root filesystem removed (shutil.rmtree).")
         except Exception as e:
-            print(f"ERROR: Błąd podczas usuwania RootFS: {e}")
+            print(f"ERROR: Error while removing RootFS: {e}") # Błąd podczas usuwania RootFS
 
     print("PASS: Root filesystem removed.")
-
 
 
     # 4. Remove cgroup directory
@@ -632,19 +630,19 @@ def cleanup_container(container_pid: int, image_arg: str):
         print(f"4. Removing cgroup directory: {CGROUP_PATH}")
         
         try:
-            # Próba usunięcia za pomocą os.rmdir()
-            # To się uda TYLKO, jeśli jądro zwolniło wszystkie zasoby w CGROUP_PATH
+            # Attempt to remove using os.rmdir()
+            # This will only succeed IF the kernel has released all resources in CGROUP_PATH
             os.rmdir(CGROUP_PATH) 
             print("PASS: Cgroup directory removed.")
             
         except OSError as e:
-            # Wychwycenie błędu, jeśli katalog nie jest pusty lub brak uprawnień
+            # Catch error if the directory is not empty or permission denied
             print(f"ERROR: Failed to remove cgroup directory {CGROUP_PATH}.")
             print(f"   Details: {e.strerror}. ")
-            print("   WARNING: Może to oznaczać, że procesy kontenera są nadal aktywne lub zasoby nie zostały zwolnione.")
+            print("   WARNING: This may mean that container processes are still active or resources have not been released.") # Może to oznaczać...
 
     else:
-        print(f"4. Cgroup directory {CGROUP_PATH} nie istnieje. Pomijam czyszczenie.")
+        print(f"4. Cgroup directory {CGROUP_PATH} does not exist. Skipping cleanup.") # nie istnieje. Pomijam czyszczenie.
         
     # 5. Remove temporary build files (NEW)
     print("5. Removing temporary build artifacts...")
@@ -682,17 +680,17 @@ def main_create(image_arg: str):
             f.write('256M')
         print(f"PASS: Memory limit set to 256MB in {memory_path.name}")
     except OSError as e:
-        print(f"ERROR: Failed to set memory limit: {e.strerror}. (Wymagane uprawnienia?)")
+        print(f"ERROR: Failed to set memory limit: {e.strerror}. (Required permissions?)") # Wymagane uprawnienia?
 
 
-    # 2. Zapisywanie limitu CPU (zamiast 'echo 50000 100000 > ...')
+    # 2. Writing CPU limit (instead of 'echo 50000 100000 > ...')
     cpu_path = Path(CGROUP_PATH) / 'cpu.max'
     try:
         with open(cpu_path, 'w') as f:
             f.write('50000 100000')
         print(f"PASS: CPU limit set to 50% in {cpu_path.name}")
     except OSError as e:
-        print(f"ERROR: Failed to set CPU limit: {e.strerror}. (Wymagane uprawnienia?)")
+        print(f"ERROR: Failed to set CPU limit: {e.strerror}. (Required permissions?)") # Wymagane uprawnienia?
 
 
     run_cmd(["mount", "-t", "devtmpfs", "none", f"{CONTAINER_ROOT}/dev"])
