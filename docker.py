@@ -91,7 +91,7 @@ def run_cmd_on_container(container_pid: int, cmd: str) -> Optional[str]:
 # --- GLOBAL CONFIGURATION ---
 CONTAINER_ROOT = Path("./my_image_root")
 # Network Configuration
-BRIDGE_NAME = "custom-bridge-0"
+custbr = "custom-bridge-0"
 
 
 class NetworkGenerationError(RuntimeError):
@@ -194,7 +194,7 @@ def find_host_interface():
     if match:
         interface_name = match.group(1)
         logger.info(f"Found default interface: {interface_name}")
-        if interface_name not in ("lo", BRIDGE_NAME):
+        if interface_name not in ("lo", custbr):
             return interface_name
 
 
@@ -595,13 +595,13 @@ def setup_network(container_pid: int):
 
     logger.info("2/8: Creating Bridge and assigning IP...")
     run_cmd_host(
-        ["ip", "link", "add", "name", BRIDGE_NAME, "type", "bridge"],
+        ["ip", "link", "add", "name", custbr, "type", "bridge"],
         ignore_stderr=True,
         check_error=False,
     )
-    run_cmd_host(["ip", "link", "set", BRIDGE_NAME, "up"])
+    run_cmd_host(["ip", "link", "set", custbr, "up"])
     run_cmd_host(
-        ["ip", "addr", "add", bridge_ip, "dev", BRIDGE_NAME],
+        ["ip", "addr", "add", bridge_ip, "dev", custbr],
         check_error=False,
         ignore_stderr=True,
     )
@@ -621,7 +621,7 @@ def setup_network(container_pid: int):
             veth_guest,
         ]
     )
-    run_cmd_host(["ip", "link", "set", veth_host, "master", BRIDGE_NAME])
+    run_cmd_host(["ip", "link", "set", veth_host, "master", custbr])
     run_cmd_host(["ip", "link", "set", veth_host, "up"])
 
     logger.info("4/8: Moving VETH to namespace...")
@@ -653,7 +653,7 @@ def setup_network(container_pid: int):
             "FORWARD",
             "1",
             "-i",
-            BRIDGE_NAME,
+            custbr,
             "-o",
             host_interface,
             "-j",
@@ -670,7 +670,7 @@ def setup_network(container_pid: int):
             "-i",
             host_interface,
             "-o",
-            BRIDGE_NAME,
+            custbr,
             "-m",
             "state",
             "--state",
@@ -735,7 +735,7 @@ def remove_network_config():
             "-D",
             "FORWARD",
             "-i",
-            BRIDGE_NAME,
+            custbr,
             "-o",
             host_interface,
             "-j",
@@ -753,7 +753,7 @@ def remove_network_config():
             "-i",
             host_interface,
             "-o",
-            BRIDGE_NAME,
+            custbr,
             "-m",
             "state",
             "--state",
@@ -768,21 +768,21 @@ def remove_network_config():
     logger.info("Iptables rules removed.")
 
     if run_cmd_host(
-        ["ip", "link", "show", BRIDGE_NAME], check_error=False, pipe_output=True
+        ["ip", "link", "show", custbr], check_error=False, pipe_output=True
     ):
-        logger.info(f"2. Removing bridge {BRIDGE_NAME}...")
+        logger.info(f"2. Removing bridge {custbr}...")
         run_cmd_host(
-            ["ip", "addr", "del", bridge_ip, "dev", BRIDGE_NAME],
+            ["ip", "addr", "del", bridge_ip, "dev", custbr],
             check_error=False,
             ignore_stderr=True,
         )
         run_cmd_host(
-            ["ip", "link", "set", BRIDGE_NAME, "down"],
+            ["ip", "link", "set", custbr, "down"],
             check_error=False,
             ignore_stderr=True,
         )
         run_cmd_host(
-            ["ip", "link", "del", BRIDGE_NAME], check_error=False, ignore_stderr=True
+            ["ip", "link", "del", custbr], check_error=False, ignore_stderr=True
         )
         logger.info("Bridge removed.")
     else:
