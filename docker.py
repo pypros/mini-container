@@ -4,18 +4,14 @@ import signal
 import time
 import sys
 import shutil
-import json
 from typing import List, Optional
 from pathlib import Path
-import http.client
-import urllib.parse
-import tarfile
-import ssl
 import argparse
 import re
 import logging
 import ipaddress
 import random
+import image_downloader
 
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -56,7 +52,9 @@ def run_cmd_host(
         sys.exit(1)
 
 
-def run_cmd_on_container(container_pid: int, cmd: str) -> Optional[str]:
+def run_cmd_on_container(
+    container_pid: int, cmd: str, container_root: Path
+) -> Optional[str]:
     """
     Executes a shell command or a multi-command string inside the container's
     isolated namespaces (mount, net, uts) using nsenter.
@@ -77,7 +75,7 @@ def run_cmd_on_container(container_pid: int, cmd: str) -> Optional[str]:
         "--mount",
         "--net",
         "--uts",
-        f"--root={CONTAINER_ROOT}",
+        f"--root={container_root}",
         "/bin/sh",
         "-c",
         cmd,  # Pass the command string as the argument to /bin/sh -c
@@ -88,23 +86,17 @@ def run_cmd_on_container(container_pid: int, cmd: str) -> Optional[str]:
     return run_cmd_host(nsenter_cmd, pipe_output=True, check_error=True)
 
 
-# --- GLOBAL CONFIGURATION ---
-CONTAINER_ROOT = Path("./my_image_root")
-# Network Configuration
-custbr = "custom-bridge-0"
-
-
 class NetworkGenerationError(RuntimeError):
     """Raised when a free subnet cannot be found after the maximum number of attempts."""
 
     pass
 
 
-def get_used_subnets(run_cmd_host_func):
+def get_used_subnets():
     """Retrieves a list of all subnets used on the host based on the routing table."""
     used_subnets = set()
     # Show all routes in CIDR format
-    route_output = run_cmd_host_func(
+    route_output = run_cmd_host(
         ["ip", "route", "show"], pipe_output=True, check_error=False
     )
 
@@ -130,13 +122,13 @@ def get_used_subnets(run_cmd_host_func):
     return used_subnets
 
 
-def generate_non_conflicting_network_config(run_cmd_host_func):
+def generate_non_conflicting_network_config():
     """
     Generates a unique set of IP addresses that does not conflict with active host networks.
     Picks a random, private /16 subnet from the 172.16.0.0/12 range.
     """
 
-    used_subnets = get_used_subnets(run_cmd_host_func)
+    used_subnets = get_used_subnets()
     MAX_TRIES = 5
 
     # Private Class B range is 172.16.0.0/12, spanning 172.16.x.x to 172.31.x.x
@@ -179,14 +171,7 @@ def generate_non_conflicting_network_config(run_cmd_host_func):
     )
 
 
-config = generate_non_conflicting_network_config(run_cmd_host)
-
-container_network = config["container_network"]
-bridge_ip = config["bridge_ip"]
-container_ip = config["container_ip"]
-
-
-def find_host_interface():
+def find_host_interface(custom_bridge: str):
     route_output = run_cmd_host(
         ["ip", "route", "show", "default"], pipe_output=True, check_error=True
     )
@@ -194,36 +179,8 @@ def find_host_interface():
     if match:
         interface_name = match.group(1)
         logger.info(f"Found default interface: {interface_name}")
-        if interface_name not in ("lo", custbr):
+        if interface_name not in ("lo", custom_bridge):
             return interface_name
-
-
-host_interface = find_host_interface()
-logger.info(f"Using host interface: {host_interface}")
-
-# Cgroups
-CGROUP_NAME = Path("my_custom_container")
-CGROUP_PATH = Path("/sys/fs/cgroup") / CGROUP_NAME
-
-# Handshake File - used to signal that the network is ready
-NETWORK_READY_FLAG = "network_ready"
-
-# Directories created during image download (NEW)
-BUILD_TEMP_DIR = Path(".docker_temp")
-IMAGE_LAYERS_DIR = Path(".image_layers")
-COMPOSE_DIR = os.path.join(BUILD_TEMP_DIR, "compose_temp")  # Will use temp/compose_temp
-
-
-def cleanup_download_artifacts():
-    """Removes temporary directories after image download and extraction."""
-    for directory in [CONTAINER_ROOT, BUILD_TEMP_DIR, IMAGE_LAYERS_DIR, COMPOSE_DIR]:
-        if os.path.isdir(directory):
-            try:
-                shutil.rmtree(directory)
-            except OSError as e:
-                logger.error(
-                    f"Error cleaning download artifacts {directory}: {e}"
-                )  # Błąd czyszczenia artefaktów pobierania
 
 
 def get_arch() -> str:
@@ -258,327 +215,13 @@ def parse_image(full_image_arg):
     return name, tag
 
 
-def request(host, url, method="GET", headers={}, save_path=None):
-    """
-    General function for performing HTTP/HTTPS requests with manual redirect handling (3xx).
-    Logic copied from DockerPuller._make_request.
-    """
-    MAX_REDIRECTS = 5
-    redirect_count = 0
-    current_host = host
-    current_url = url
-
-    while redirect_count < MAX_REDIRECTS:
-        conn = None
-        try:
-            parsed_url = urllib.parse.urlparse(f"https://{current_host}{current_url}")
-            current_host = parsed_url.netloc
-            current_path = parsed_url.path + (
-                "?" + parsed_url.query if parsed_url.query else ""
-            )
-
-            context = ssl.create_default_context()
-            conn = http.client.HTTPSConnection(current_host, context=context)
-
-            # KEY LOGIC FROM YOUR CLASS: Removing the Authorization header after the first redirect
-            req_headers = headers.copy()
-            if redirect_count > 0 and "Authorization" in req_headers:
-                # After redirecting to the storage server (blobs), authorization is often built into the link
-                del req_headers["Authorization"]
-
-            conn.request(method, current_path, headers=req_headers)
-            response = conn.getresponse()
-
-            # Handling redirects (Status 3xx)
-            if response.status in (301, 302, 307, 308):
-                new_location = response.getheader("Location")
-                if not new_location:
-                    raise Exception("Redirect without Location header.")
-
-                new_parsed_url = urllib.parse.urlparse(new_location)
-                current_host = new_parsed_url.netloc
-                current_url = new_parsed_url.path + (
-                    "?" + new_parsed_url.query if new_parsed_url.query else ""
-                )
-
-                redirect_count += 1
-                conn.close()
-                continue
-
-            if response.status == 200:
-                if save_path:
-                    with open(save_path, "wb") as f:
-                        shutil.copyfileobj(response, f)
-                    return "File saved", 200
-                else:
-                    data = response.read().decode("utf-8")
-                    return data, 200
-            else:
-                error_data = response.read().decode("utf-8", errors="ignore")
-                logger.error(
-                    f"HTTP Status {response.status} for {current_host}{current_path}"
-                )
-                return error_data, response.status
-
-        except Exception as e:
-            logger.error(f"Error during request to {current_host}{current_path}: {e}")
-            return None, None
-        finally:
-            if conn:
-                conn.close()
-
-    if redirect_count == MAX_REDIRECTS:
-        logger.error("Maximum redirect limit reached.")
-        return None, None
-
-    return None, None
-
-
-def download_image(full_image_arg: str):
-    """
-    Downloads a Docker image (v2 Registry API) using proven logic from the
-    DockerPuller class (manual redirect handling and token removal for S3).
-
-    Preserves the functionality of the old download_image (downloads, creates tar, extracts RootFS).
-
-    Args:
-        full_image_arg (str): Image name with tag, e.g., 'alpine:latest'.
-    """
-    architecture = get_arch()
-    token = ""
-    digest = ""
-    layer_digests = []
-    config_digest = ""
-    config_output_path = ""
-    config_filename_short = ""
-    final_tar_name = None
-    image, tag = parse_image(full_image_arg)
-    simple_tag = f"{image}:{tag}"
-    logger.info(
-        f"--- Starting manual pull of image {image}:{tag} ({architecture}) using pure Python ---"
-    )
-
-    def _step1_get_authorization_token():
-        nonlocal token
-        logger.info("1/8: Retrieving authorization token...")
-        host = "auth.docker.io"
-        url = f"/token?service=registry.docker.io&scope=repository:{image}:pull"
-        response_data, status = request(host, url)
-        if response_data is None or status != 200:
-            raise Exception("Authentication server did not return a valid response.")
-        try:
-            token_json = json.loads(response_data)
-            token = token_json.get("token")
-        except json.JSONDecodeError:
-            raise Exception("Failed to decode token response JSON.")
-        if not token:
-            logger.error(f"Server returned error: {response_data}")
-            raise Exception("Failed to extract token.")
-        logger.info("Token obtained successfully.")
-
-    def _step2_3_get_manifest_list_and_digest():
-        nonlocal digest
-        logger.info(
-            f"2/8 & 3/8: Retrieving Manifest List and extracting digest for {architecture}..."
-        )
-        host = "registry-1.docker.io"
-        url = f"/v2/{image}/manifests/{tag}"
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/vnd.docker.distribution.manifest.list.v2+json",
-        }
-        manifest_list_data, status = request(host, url, headers=headers)
-        if manifest_list_data is None or status != 200:
-            raise Exception("Manifest list request failed.")
-
-        manifest_list = json.loads(manifest_list_data)
-        digest_found = None
-        for manifest in manifest_list.get("manifests", []):
-            platform_info = manifest.get("platform", {})
-            if platform_info.get("architecture") == architecture:
-                digest_found = manifest.get("digest")
-                break
-        if not digest_found:
-            raise Exception(f"No digest found for architecture {architecture}.")
-        digest = digest_found
-        logger.info(f"Digest found for {architecture}: {digest}")
-
-    def _step4_download_manifest():
-        nonlocal layer_digests, config_digest
-        logger.info("4/8: Downloading the actual image manifest using the digest...")
-        manifest_path = os.path.join(BUILD_TEMP_DIR, "manifest.json")
-        host = "registry-1.docker.io"
-        url = f"/v2/{image}/manifests/{digest}"
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Accept": "application/vnd.docker.distribution.manifest.v2+json",
-        }
-
-        response_data, status = request(host, url, headers=headers)
-        if status != 200:
-            raise Exception("Failed to download manifest.")
-
-        # Saving the manifest to a file, then loading it (as in DockerPuller)
-        with open(manifest_path, "w") as f:
-            f.write(response_data)
-
-        manifest_data = json.loads(response_data)
-        layer_digests = [layer["digest"] for layer in manifest_data.get("layers", [])]
-
-        # Optionally saving the list of digests to a file (as in DockerPuller, for order)
-        blobs_list_path = os.path.join(BUILD_TEMP_DIR, "blobs_list.txt")
-        with open(blobs_list_path, "w") as f:
-            for dgst in layer_digests:
-                f.write(f"{dgst}\n")
-
-        config_digest = manifest_data.get("config", {}).get("digest")
-        if not layer_digests or not config_digest:
-            raise Exception(
-                "Manifest parsing failed (empty layers or config digest missing)."
-            )
-        logger.info(
-            f"Manifest saved and layer list ({len(layer_digests)} layers) extracted."
-        )
-
-    def _step5_download_layers():
-        logger.info("5/8: Downloading layers (blobs)...")
-        os.makedirs(IMAGE_LAYERS_DIR, exist_ok=True)
-        host = "registry-1.docker.io"
-        download_count = 0
-        for blob_sum in layer_digests:
-            hash_part = blob_sum.split(":", 1)[1]
-            logger.info(f"   -> Downloading: {blob_sum}...")
-            layer_path = os.path.join(IMAGE_LAYERS_DIR, f"{hash_part}.tar.gz")
-            url = f"/v2/{image}/blobs/{blob_sum}"
-            headers = {"Authorization": f"Bearer {token}"}
-
-            # Use _make_request, which handles redirects and removes the header
-            result, status = request(host, url, headers=headers, save_path=layer_path)
-            if status == 200:
-                download_count += 1
-            else:
-                raise Exception(
-                    f"Failed to download layer {blob_sum}. Status: {status}"
-                )
-        logger.info(
-            f"Successfully downloaded {download_count} layers to {IMAGE_LAYERS_DIR}."
-        )
-
-    def _step6_download_config():
-        nonlocal config_output_path, config_filename_short
-        logger.info("6/8: Downloading the configuration file...")
-        config_filename = config_digest.split(":", 1)[1]
-        config_output_path = os.path.join(BUILD_TEMP_DIR, f"{config_filename}.json")
-        config_filename_short = f"{config_filename}.json"
-        host = "registry-1.docker.io"
-        url = f"/v2/{image}/blobs/{config_digest}"
-        headers = {"Authorization": f"Bearer {token}"}
-
-        # Use _make_request, which handles redirects and removes the header
-        result, status = request(
-            host, url, headers=headers, save_path=config_output_path
-        )
-        if status != 200:
-            raise Exception(f"Failed to download configuration file. Status: {status}")
-        logger.info(f"Configuration file saved as {config_output_path}.")
-
-    def _step7_assemble_tar_archive():
-        nonlocal final_tar_name
-        logger.info("7/8: Assembling the image into a .tar archive...")
-        os.makedirs(COMPOSE_DIR, exist_ok=True)
-
-        # 1. Move the configuration file (we remove it from build_temp_dir)
-        shutil.move(
-            config_output_path, os.path.join(COMPOSE_DIR, config_filename_short)
-        )
-
-        layer_paths_for_manifest = []
-
-        # 2. Copy and rename layers for the archive
-        for blob_sum in layer_digests:
-            hash_part = blob_sum.split(":", 1)[1]
-
-            tar_gz_path = os.path.join(IMAGE_LAYERS_DIR, f"{hash_part}.tar.gz")
-            compose_tar_path = os.path.join(COMPOSE_DIR, f"{hash_part}.tar")
-            layer_paths_for_manifest.append(f"{hash_part}.tar")
-
-            # Copy of the compressed file, but with a *.tar name
-            shutil.copyfile(tar_gz_path, compose_tar_path)
-
-            # Add the VERSION file (as in DockerPuller)
-            with open(os.path.join(COMPOSE_DIR, f"{hash_part}.tar.version"), "w") as f:
-                f.write("1.0\n")
-
-        # 3. Create manifest.json
-        layer_paths_json = ", ".join([f'"{h}"' for h in layer_paths_for_manifest])
-        catalog_manifest = f"""[ {{
-            "Config": "{config_filename_short}",
-            "RepoTags": [ "{simple_tag}" ],
-            "Layers": [ {layer_paths_json} ]
-        }} ]"""
-
-        with open(os.path.join(COMPOSE_DIR, "manifest.json"), "w") as manifest:
-            manifest.write(catalog_manifest)
-
-        # 4. Packaging into an archive
-        final_tar_name = (
-            f"{full_image_arg.replace('/', '_').replace(':', '_')}_loaded.tar"
-        )
-
-        with tarfile.open(final_tar_name, "w") as tar:
-            for item in os.listdir(COMPOSE_DIR):
-                tar.add(os.path.join(COMPOSE_DIR, item), arcname=item)
-
-        logger.info(f"Image assembled into {final_tar_name}.")
-
-    def _step8_extract_rootfs():
-        logger.info(
-            f"8/8: Extracting layers into a complete root filesystem in {CONTAINER_ROOT}..."
-        )
-
-        shutil.rmtree(CONTAINER_ROOT, ignore_errors=True)
-        CONTAINER_ROOT.mkdir(parents=True, exist_ok=True)
-
-        extraction_count = 0
-        for blob_sum in layer_digests:
-            hash_part = blob_sum.split(":", 1)[1]
-            layer_tar_gz = os.path.join(IMAGE_LAYERS_DIR, f"{hash_part}.tar.gz")
-
-            logger.info(f"   -> Extracting layer: {hash_part[:10]}...")
-
-            # Using the tarfile module for decompression and extraction (as in DockerPuller)
-            with tarfile.open(layer_tar_gz, "r:gz") as tar:
-                tar.extractall(path=CONTAINER_ROOT)
-
-            extraction_count += 1
-
-        logger.info(
-            f"Successfully extracted {extraction_count} layers to {CONTAINER_ROOT}."
-        )
-
-    # --- Main sequence (Replaces pull_image) ---
-    try:
-        os.makedirs(BUILD_TEMP_DIR, exist_ok=True)  # Creating the main temp directory
-
-        _step1_get_authorization_token()
-        _step2_3_get_manifest_list_and_digest()
-        _step4_download_manifest()
-        _step5_download_layers()
-        _step6_download_config()
-        _step7_assemble_tar_archive()
-        _step8_extract_rootfs()
-
-        # cleanup_download_artifacts()
-
-    except Exception as e:
-        logger.critical(f"\nDuring pull process: {e}")
-        cleanup_download_artifacts()
-
-
-# --- OTHER CORE LOGIC FUNCTIONS (Unchanged setup_network) ---
-
-
-def setup_network(container_pid: int):
+def setup_network(
+    container_pid: int,
+    custom_bridge: str,
+    container_root: str,
+    bridge_ip: str,
+    container_network: str,
+):
     """Creates VETH, bridge, NAT, and configures the network using the container's PID.
 
     This function is optimized to reduce the number of external program calls to 8.
@@ -595,13 +238,13 @@ def setup_network(container_pid: int):
 
     logger.info("2/8: Creating Bridge and assigning IP...")
     run_cmd_host(
-        ["ip", "link", "add", "name", custbr, "type", "bridge"],
+        ["ip", "link", "add", "name", custom_bridge, "type", "bridge"],
         ignore_stderr=True,
         check_error=False,
     )
-    run_cmd_host(["ip", "link", "set", custbr, "up"])
+    run_cmd_host(["ip", "link", "set", custom_bridge, "up"])
     run_cmd_host(
-        ["ip", "addr", "add", bridge_ip, "dev", custbr],
+        ["ip", "addr", "add", bridge_ip, "dev", custom_bridge],
         check_error=False,
         ignore_stderr=True,
     )
@@ -621,7 +264,7 @@ def setup_network(container_pid: int):
             veth_guest,
         ]
     )
-    run_cmd_host(["ip", "link", "set", veth_host, "master", custbr])
+    run_cmd_host(["ip", "link", "set", veth_host, "master", custom_bridge])
     run_cmd_host(["ip", "link", "set", veth_host, "up"])
 
     logger.info("4/8: Moving VETH to namespace...")
@@ -653,7 +296,7 @@ def setup_network(container_pid: int):
             "FORWARD",
             "1",
             "-i",
-            custbr,
+            custom_bridge,
             "-o",
             host_interface,
             "-j",
@@ -670,7 +313,7 @@ def setup_network(container_pid: int):
             "-i",
             host_interface,
             "-o",
-            custbr,
+            custom_bridge,
             "-m",
             "state",
             "--state",
@@ -681,12 +324,11 @@ def setup_network(container_pid: int):
     )
 
     logger.info("6/8: Writing resolv.conf...")
-    RESOLV_CONF_CONTENT = "nameserver 8.8.8.8\n" "nameserver 1.1.1.1\n"
     try:
-        RESOLV_CONF_PATH = os.path.join(CONTAINER_ROOT, "etc", "resolv.conf")
-        os.makedirs(os.path.join(CONTAINER_ROOT, "etc"), exist_ok=True)
+        RESOLV_CONF_PATH = os.path.join(container_root, "etc", "resolv.conf")
+        os.makedirs(os.path.join(container_root, "etc"), exist_ok=True)
         with open(RESOLV_CONF_PATH, "w") as f:
-            f.write(RESOLV_CONF_CONTENT)
+            f.write("nameserver 8.8.8.8\n" "nameserver 1.1.1.1\n")
     except Exception as e:
         logger.error(f"Error writing resolv.conf: {e}")
         sys.exit(1)
@@ -700,12 +342,17 @@ def setup_network(container_pid: int):
             ip addr add {container_ip} dev {veth_guest} && \
             ip route add default via {gateway_ip};
         """,
+        container_root,
     )
 
     logger.info("--- NETWORK CONFIGURATION COMPLETE ---")
 
 
-def remove_network_config():
+def remove_network_config(
+    custom_bridge: str,
+    container_network: str,
+    host_interface: str,
+):
     """Removes global network configurations (iptables, bridge)."""
     logger.info("--- CLEANING GLOBAL NETWORK CONFIGURATION ---")
 
@@ -735,7 +382,7 @@ def remove_network_config():
             "-D",
             "FORWARD",
             "-i",
-            custbr,
+            custom_bridge,
             "-o",
             host_interface,
             "-j",
@@ -753,7 +400,7 @@ def remove_network_config():
             "-i",
             host_interface,
             "-o",
-            custbr,
+            custom_bridge,
             "-m",
             "state",
             "--state",
@@ -768,21 +415,21 @@ def remove_network_config():
     logger.info("Iptables rules removed.")
 
     if run_cmd_host(
-        ["ip", "link", "show", custbr], check_error=False, pipe_output=True
+        ["ip", "link", "show", custom_bridge], check_error=False, pipe_output=True
     ):
-        logger.info(f"2. Removing bridge {custbr}...")
+        logger.info(f"2. Removing bridge {custom_bridge}...")
         run_cmd_host(
-            ["ip", "addr", "del", bridge_ip, "dev", custbr],
+            ["ip", "addr", "del", bridge_ip, "dev", custom_bridge],
             check_error=False,
             ignore_stderr=True,
         )
         run_cmd_host(
-            ["ip", "link", "set", custbr, "down"],
+            ["ip", "link", "set", custom_bridge, "down"],
             check_error=False,
             ignore_stderr=True,
         )
         run_cmd_host(
-            ["ip", "link", "del", custbr], check_error=False, ignore_stderr=True
+            ["ip", "link", "del", custom_bridge], check_error=False, ignore_stderr=True
         )
         logger.info("Bridge removed.")
     else:
@@ -790,7 +437,9 @@ def remove_network_config():
     logger.info("--- GLOBAL NETWORK CLEANUP COMPLETE ---")
 
 
-def cleanup_container(container_pid: int, image_arg: str):
+def cleanup_container(
+    container_pid: int, image_arg: str, container_root: Path, cgrup_path: Path
+):
     """Cleans up container artifacts (process, VETH, cgroups, rootfs)."""
     logger.info("--- CLEANING CONTAINER ARTIFACTS ---")
 
@@ -816,22 +465,22 @@ def cleanup_container(container_pid: int, image_arg: str):
             )
     logger.info("VETH interfaces checked/removed.")
 
-    logger.info(f"3. Removing container root filesystem: {CONTAINER_ROOT}")
+    logger.info(f"3. Removing container root filesystem: {container_root}")
     run_cmd_host(
-        ["umount", f"{CONTAINER_ROOT}/dev"], check_error=False, ignore_stderr=True
+        ["umount", f"{container_root}/dev"], check_error=False, ignore_stderr=True
     )
     run_cmd_host(
-        ["umount", f"{CONTAINER_ROOT}/proc"], check_error=False, ignore_stderr=True
+        ["umount", f"{container_root}/proc"], check_error=False, ignore_stderr=True
     )
     run_cmd_host(
-        ["umount", f"{CONTAINER_ROOT}/sys"], check_error=False, ignore_stderr=True
+        ["umount", f"{container_root}/sys"], check_error=False, ignore_stderr=True
     )
 
-    shutil.rmtree(CONTAINER_ROOT, ignore_errors=True)
+    shutil.rmtree(container_root, ignore_errors=True)
     logger.info("Root filesystem removed.")
 
     logger.info("4. Remove cgroup director...")
-    shutil.rmtree(CGROUP_PATH, ignore_errors=True)
+    shutil.rmtree(cgrup_path, ignore_errors=True)
 
     logger.info("5. Removing temporary build artifacts...")
     shutil.rmtree(BUILD_TEMP_DIR, ignore_errors=True)
@@ -855,11 +504,24 @@ def cleanup_container(container_pid: int, image_arg: str):
     logger.info("--- CONTAINER ARTIFACTS CLEANUP COMPLETE ---")
 
 
-def main_create(image_arg: str):
+def main_create(
+    image_arg: str, container_root: Path, cgrup_path: Path
+):
     """Main function to create and run the container with PID 1 as /bin/sh."""
 
     # 1. Download and prepare the filesystem (MANUAL DOWNLOAD)
-    download_image(image_arg)
+    image, tag = parse_image(image_arg)
+    architecture = get_arch()
+    image_downloader.download_image(
+        image_arg,
+        image,
+        tag,
+        architecture,
+        BUILD_TEMP_DIR,
+        IMAGE_LAYERS_DIR,
+        container_root,
+        COMPOSE_DIR,
+    )
 
     logger.info("\n2. Configuring cgroups and mounting /dev...")
     # Attempt to mount cgroup2, ignoring errors if already mounted
@@ -868,9 +530,8 @@ def main_create(image_arg: str):
         check_error=False,
         ignore_stderr=True,
     )
-    cgroup_path_obj = Path(CGROUP_PATH)
-    cgroup_path_obj.mkdir(parents=True, exist_ok=True)
-    memory_path = Path(CGROUP_PATH) / "memory.max"
+    cgrup_path.mkdir(parents=True, exist_ok=True)
+    memory_path = cgrup_path / "memory.max"
     try:
         with open(memory_path, "w") as f:
             f.write("256M")
@@ -881,7 +542,7 @@ def main_create(image_arg: str):
         )
 
     # 2. Writing CPU limit (instead of 'echo 50000 100000 > ...')
-    cpu_path = Path(CGROUP_PATH) / "cpu.max"
+    cpu_path = cgrup_path / "cpu.max"
     try:
         with open(cpu_path, "w") as f:
             f.write("50000 100000")
@@ -889,11 +550,14 @@ def main_create(image_arg: str):
     except OSError as e:
         logger.error(f"Failed to set CPU limit: {e.strerror}. (Required permissions?)")
 
-    run_cmd_host(["mount", "-t", "devtmpfs", "none", f"{CONTAINER_ROOT}/dev"])
+    run_cmd_host(["mount", "-t", "devtmpfs", "none", f"{container_root}/dev"])
     logger.info("Cgroups configured.")
 
     # 3. Launch the container process (Init Script)
     logger.info("\n3. Launching Init Script (PID 1) in the isolated environment...")
+
+    # Handshake File - used to signal that the network is ready
+    NETWORK_READY_FLAG = "network_ready"
 
     # Script executed as PID 1 in the container
     CONTAINER_INIT_CMD = f"""
@@ -928,7 +592,7 @@ def main_create(image_arg: str):
         "--user",
         "--kill-child",
         "--map-root-user",
-        f"--root={CONTAINER_ROOT}",
+        f"--root={container_root}",
         "/bin/sh",
         "-c",
         CONTAINER_INIT_CMD,
@@ -946,18 +610,24 @@ def main_create(image_arg: str):
     time.sleep(1)  # Give time for startup and /proc mounting
 
     # Assign PID to Cgroup on the HOST
-    run_cmd_host(["sh", "-c", f"echo {unshare_pid} > {CGROUP_PATH}/cgroup.procs"])
+    run_cmd_host(["sh", "-c", f"echo {unshare_pid} > {cgrup_path}/cgroup.procs"])
 
     try:
-        setup_network(unshare_pid)
+        setup_network(
+            unshare_pid,
+            custom_bridge,
+            container_root,
+            bridge_ip,
+            container_network,
+        )
 
         logger.info("\n4. Network ready. Sending Handshake signal to PID 1...")
         run_cmd_host(
-            ["rm", "-f", f"{CONTAINER_ROOT}/{NETWORK_READY_FLAG}"],
+            ["rm", "-f", f"{container_root}/{NETWORK_READY_FLAG}"],
             check_error=False,
             ignore_stderr=True,
         )
-        run_cmd_host(["touch", f"{CONTAINER_ROOT}/{NETWORK_READY_FLAG}"])
+        run_cmd_host(["touch", f"{container_root}/{NETWORK_READY_FLAG}"])
 
         logger.info(
             "\n5. Entering interactive shell (PID 1 is now /bin/sh. Type 'exit' to quit)..."
@@ -974,8 +644,8 @@ def main_create(image_arg: str):
             pass
     finally:
         logger.info("\n6. Initiating cleanup...")
-        remove_network_config()
-        cleanup_container(unshare_pid, image_arg)
+        remove_network_config(custom_bridge, container_network, host_interface)
+        cleanup_container(unshare_pid, image_arg, container_root, cgrup_path)
         logger.info("Container management process finished.")
 
 
@@ -996,11 +666,17 @@ def get_parent_pid_of_shell():
     return unshare_pid
 
 
-def main_remove(image_arg: str):
+def main_remove(
+    image_arg: str,
+    container_root: Path,
+    custom_bridge: str,
+    host_interface: str,
+    cgrup_path: Path,
+):
     """Main function to remove all resources."""
     unshare_pid = get_parent_pid_of_shell()
-    remove_network_config()
-    cleanup_container(unshare_pid, image_arg)
+    remove_network_config(custom_bridge, container_network, host_interface)
+    cleanup_container(unshare_pid, image_arg, container_root, cgrup_path)
     logger.info("Full resource cleanup complete.")
 
 
@@ -1048,10 +724,32 @@ def parse_args():
 
 
 if __name__ == "__main__":
+    container_root = Path("./my_image_root")
+    custom_bridge = "custom-bridge-0"
+    host_interface = find_host_interface(custom_bridge)
+    logger.info(f"Using host interface: {host_interface}")
+
+    # Cgroups
+    CGROUP_NAME = Path("my_custom_container")
+    CGROUP_PATH = Path("/sys/fs/cgroup") / CGROUP_NAME
+
+    # Directories created during image download (NEW)
+    BUILD_TEMP_DIR = Path(".docker_temp")
+    COMPOSE_DIR = BUILD_TEMP_DIR / "compose_temp"
+    IMAGE_LAYERS_DIR = Path(".image_layers")
+
+
+    config = generate_non_conflicting_network_config()
+
+    container_network = config["container_network"]
+    bridge_ip = config["bridge_ip"]
+    container_ip = config["container_ip"]
 
     args = parse_args()
 
     if args.command == "run":
-        main_create(args.image_arg)
+        main_create(args.image_arg, container_root, CGROUP_PATH)
     elif args.command == "rm":
-        main_remove(args.image_arg)
+        main_remove(
+            args.image_arg, container_root, custom_bridge, host_interface, CGROUP_PATH
+        )
