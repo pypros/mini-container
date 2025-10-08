@@ -3,6 +3,7 @@ import shutil
 import json
 import tarfile
 import logging
+from typing import List, Tuple
 from .api_requests import request
 from pathlib import Path
 
@@ -11,7 +12,7 @@ logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
 
 
-def get_authorization_token(image):
+def get_authorization_token(image: str) -> str:
     logger.info("1/8: Retrieving authorization token...")
     host = "auth.docker.io"
     url = f"/token?service=registry.docker.io&scope=repository:{image}:pull"
@@ -19,7 +20,7 @@ def get_authorization_token(image):
     if response_data is None or status != 200:
         raise Exception("Authentication server did not return a valid response.")
     try:
-        token_json = json.loads(response_data)
+        token_json = json.loads(response_data or "")
         token = token_json.get("token")
     except json.JSONDecodeError:
         raise Exception("Failed to decode token response JSON.")
@@ -27,10 +28,10 @@ def get_authorization_token(image):
         logger.error(f"Server returned error: {response_data}")
         raise Exception("Failed to extract token.")
     logger.info("Token obtained successfully.")
-    return token
+    return str(token)
 
 
-def get_manifest_list_and_digest(image, tag, architecture, token):
+def get_manifest_list_and_digest(image: str, tag: str, architecture: str, token: str) -> str:
     logger.info(
         f"2/8 & 3/8: Retrieving Manifest List and extracting digest for {architecture}..."
     )
@@ -44,7 +45,7 @@ def get_manifest_list_and_digest(image, tag, architecture, token):
     if manifest_list_data is None or status != 200:
         raise Exception("Manifest list request failed.")
 
-    manifest_list = json.loads(manifest_list_data)
+    manifest_list = json.loads(manifest_list_data or "")
     digest = None
     for manifest in manifest_list.get("manifests", []):
         platform_info = manifest.get("platform", {})
@@ -54,10 +55,10 @@ def get_manifest_list_and_digest(image, tag, architecture, token):
     if not digest:
         raise Exception(f"No digest found for architecture {architecture}.")
     logger.info(f"Digest found for {architecture}: {digest}")
-    return digest
+    return str(digest)
 
 
-def download_manifest(image, digest, token, build_temp_dir):
+def download_manifest(image: str, digest: str, token: str, build_temp_dir: Path) -> Tuple[List[str], str]:
     logger.info("4/8: Downloading the actual image manifest using the digest...")
     manifest_path = build_temp_dir / "manifest.json"
     host = "registry-1.docker.io"
@@ -73,9 +74,9 @@ def download_manifest(image, digest, token, build_temp_dir):
 
     # Saving the manifest to a file, then loading it (as in DockerPuller)
     with open(manifest_path, "w") as f:
-        f.write(response_data)
+        f.write(response_data or "")
 
-    manifest_data = json.loads(response_data)
+    manifest_data = json.loads(response_data or "")
     layer_digests = [layer["digest"] for layer in manifest_data.get("layers", [])]
 
     # Optionally saving the list of digests to a file (as in DockerPuller, for order)
@@ -95,7 +96,7 @@ def download_manifest(image, digest, token, build_temp_dir):
     return layer_digests, config_digest
 
 
-def download_layers(token, image, layer_digests, image_layers_dir: Path):
+def download_layers(token: str, image: str, layer_digests: List[str], image_layers_dir: Path) -> bool:
     logger.info("5/8: Downloading layers (blobs)...")
     image_layers_dir.mkdir(parents=True, exist_ok=True)
     host = "registry-1.docker.io"
@@ -108,8 +109,8 @@ def download_layers(token, image, layer_digests, image_layers_dir: Path):
         url = f"/v2/{image}/blobs/{blob_sum}"
         headers = {"Authorization": f"Bearer {token}"}
 
-        # Use _make_request, which handles redirects and removes the header
-        result, status = request(host, url, headers=headers, save_path=layer_path)
+        # Use request, which handles redirects and removes the header
+        result, status = request(host, url, headers=headers, save_path=str(layer_path))
         if status == 200:
             download_count += 1
         else:
@@ -121,11 +122,11 @@ def download_layers(token, image, layer_digests, image_layers_dir: Path):
 
 
 def download_config(
-    token,
-    image,
-    config_digest,
+    token: str,
+    image: str,
+    config_digest: str,
     build_temp_dir: Path,
-):
+) -> Tuple[Path, str]:
     logger.info("6/8: Downloading the configuration file...")
     config_filename = config_digest.split(":", 1)[1]
     config_output_path = build_temp_dir / f"{config_filename}.json"
@@ -134,8 +135,8 @@ def download_config(
     url = f"/v2/{image}/blobs/{config_digest}"
     headers = {"Authorization": f"Bearer {token}"}
 
-    # Use _make_request, which handles redirects and removes the header
-    result, status = request(host, url, headers=headers, save_path=config_output_path)
+    # Use request, which handles redirects and removes the header
+    result, status = request(host, url, headers=headers, save_path=str(config_output_path))
     if status != 200:
         raise Exception(f"Failed to download configuration file. Status: {status}")
     logger.info(f"Configuration file saved as {config_output_path}.")
@@ -143,20 +144,20 @@ def download_config(
 
 
 def assemble_tar_archive(
-    image,
-    tag,
-    full_image_arg,
-    config_output_path,
-    config_filename_short,
-    layer_digests,
+    image: str,
+    tag: str,
+    full_image_arg: str,
+    config_output_path: Path,
+    config_filename_short: str,
+    layer_digests: List[str],
     compose_dir: Path,
     image_layers_dir: Path,
-):
+) -> str:
     logger.info("7/8: Assembling the image into a .tar archive...")
     compose_dir.mkdir(parents=True, exist_ok=True)
 
     # 1. Move the configuration file (we remove it from build_temp_dir)
-    shutil.move(config_output_path, compose_dir / config_filename_short)
+    shutil.move(str(config_output_path), str(compose_dir / config_filename_short))
 
     layer_paths_for_manifest = []
 
@@ -197,7 +198,7 @@ def assemble_tar_archive(
     return final_tar_name
 
 
-def extract_root_file_system(layer_digests, image_layers_dir, container_root):
+def extract_root_file_system(layer_digests: List[str], image_layers_dir: Path, container_root: Path) -> None:
     logger.info(
         f"8/8: Extracting layers into a complete root filesystem in {container_root}..."
     )
@@ -224,13 +225,13 @@ def extract_root_file_system(layer_digests, image_layers_dir, container_root):
 
 
 def cleanup_download_artifacts(
-    container_root, build_temp_dir, image_layers_dir, compose_dir
-):
+    container_root: Path, build_temp_dir: Path, image_layers_dir: Path, compose_dir: Path
+) -> None:
     """Removes temporary directories after image download and extraction."""
     for directory in [container_root, build_temp_dir, image_layers_dir, compose_dir]:
-        if os.path.isdir(directory):
+        if os.path.isdir(str(directory)):
             try:
-                shutil.rmtree(directory)
+                shutil.rmtree(str(directory))
             except OSError as e:
                 logger.error(f"Error cleaning download artifacts {directory}: {e}")
 
@@ -244,7 +245,7 @@ def download_image(
     image_layers_dir: Path,
     container_root: Path,
     compose_dir: Path,
-):
+) -> None:
     """
     Downloads a Docker image (v2 Registry API) using proven logic from the
     DockerPuller class (manual redirect handling and token removal for S3).
@@ -284,8 +285,6 @@ def download_image(
         )
         extract_root_file_system(layer_digests, image_layers_dir, container_root)
 
-        # cleanup_download_artifacts()
-
     except Exception as e:
         logger.critical(f"\nDuring pull process: {e}")
-        cleanup_download_artifacts()
+        cleanup_download_artifacts(container_root, build_temp_dir, image_layers_dir, compose_dir)

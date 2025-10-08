@@ -3,6 +3,8 @@ import re
 import logging
 import ipaddress
 import random
+from pathlib import Path
+from typing import Set, Dict, Optional
 from . import command
 
 
@@ -16,9 +18,9 @@ class NetworkGenerationError(RuntimeError):
     pass
 
 
-def get_used_subnets():
+def get_used_subnets() -> Set[ipaddress.IPv4Network]:
     """Retrieves a list of all subnets used on the host based on the routing table."""
-    used_subnets = set()
+    used_subnets: Set[ipaddress.IPv4Network] = set()
     # Show all routes in CIDR format
     route_output = command.run_on_host(
         ["ip", "route", "show"], pipe_output=True, check_error=False
@@ -39,14 +41,15 @@ def get_used_subnets():
                 # Add the network to the set to avoid duplicates
                 # ipaddress automatically normalizes the format (e.g., 192.168.1.5/24 -> 192.168.1.0/24)
                 network = ipaddress.ip_network(match.group(1), strict=False)
-                used_subnets.add(network)
+                if isinstance(network, ipaddress.IPv4Network):
+                    used_subnets.add(network)
             except ValueError:
                 # Ignore invalid IP formats
                 continue
     return used_subnets
 
 
-def generate_network_config():
+def generate_network_config() -> Dict[str, str]:
     """
     Generates a unique set of IP addresses that does not conflict with active host networks.
     Picks a random, private /16 subnet from the 172.16.0.0/12 range.
@@ -95,16 +98,17 @@ def generate_network_config():
     )
 
 
-def host_interface(custom_bridge: str):
+def host_interface(custom_bridge: str) -> Optional[str]:
     route_output = command.run_on_host(
         ["ip", "route", "show", "default"], pipe_output=True, check_error=True
     )
-    match = re.search(r"dev\s+(\S+)", route_output)
+    match = re.search(r"dev\s+(\S+)", route_output or "")
     if match:
         interface_name = match.group(1)
         logger.info(f"Found default interface: {interface_name}")
         if interface_name not in ("lo", custom_bridge):
             return interface_name
+    return None
 
 
 def create(
@@ -115,7 +119,7 @@ def create(
     container_network: str,
     container_ip: str,
     host_interface: str,
-):
+) -> None:
     """Creates VETH, bridge, NAT, and configures the network using the container's PID.
 
     This function is optimized to reduce the number of external program calls to 8.
@@ -219,7 +223,7 @@ def create(
 
     logger.info("6/8: Writing resolv.conf...")
     try:
-        etc = container_root / "etc"
+        etc = Path(container_root) / "etc"
         resolv_conf = etc / "resolv.conf"
         resolv_conf.parent.mkdir(parents=True, exist_ok=True)
         with open(resolv_conf, "w") as f:
@@ -237,7 +241,7 @@ def create(
             ip addr add {container_ip} dev {veth_guest} && \
             ip route add default via {gateway_ip};
         """,
-        container_root,
+        Path(container_root),
     )
 
     logger.info("--- NETWORK CONFIGURATION COMPLETE ---")
@@ -248,7 +252,7 @@ def remove(
     bridge_ip: str,
     container_network: str,
     host_interface: str,
-):
+) -> None:
     """Removes global network configurations (iptables, bridge)."""
     logger.info("--- CLEANING GLOBAL NETWORK CONFIGURATION ---")
 

@@ -8,6 +8,7 @@ from pathlib import Path
 import argparse
 import re
 import logging
+from typing import Tuple, Optional
 from . import image_downloader
 from . import command
 from . import network
@@ -26,7 +27,7 @@ def get_arch() -> str:
         "armv7l": "arm",
     }
     uname_arch = command.run_on_host(["uname", "-m"], pipe_output=True)
-    docker_arch = ARCHITECTURE_MAP.get(uname_arch, "amd64")
+    docker_arch = ARCHITECTURE_MAP.get(uname_arch or "", "amd64")
     if docker_arch == "amd64" and uname_arch not in ARCHITECTURE_MAP:
         logger.warning(
             f"Unknown system architecture ({uname_arch}). Using default: amd64."
@@ -34,7 +35,7 @@ def get_arch() -> str:
     return docker_arch
 
 
-def parse_image(full_image_arg):
+def parse_image(full_image_arg: str) -> Tuple[str, str]:
     if ":" not in full_image_arg:
         image_name = full_image_arg
         tag = "latest"
@@ -57,7 +58,7 @@ def cleanup_container(
     build_temp_dir: Path,
     image_layers_dir: Path,
     compose_dir: Path,
-):
+) -> None:
     """Cleans up container artifacts (process, VETH, cgroups, rootfs)."""
     logger.info("--- CLEANING CONTAINER ARTIFACTS ---")
 
@@ -130,7 +131,7 @@ def create(
     build_temp_dir: Path,
     image_layers_dir: Path,
     compose_dir: Path,
-):
+) -> None:
     """Main function to create and run the container with PID 1 as /bin/sh."""
 
     # 1. Download and prepare the filesystem (MANUAL DOWNLOAD)
@@ -242,11 +243,11 @@ def create(
         network.create(
             unshare_pid,
             custom_bridge,
-            container_root,
+            str(container_root),
             bridge_ip,
             container_network,
             container_ip,
-            host_interface,
+            host_interface or "",
         )
 
         logger.info("4. Network ready. Sending Handshake signal to PID 1...")
@@ -272,7 +273,7 @@ def create(
             pass
     finally:
         logger.info("6. Initiating cleanup...")
-        network.remove(custom_bridge, bridge_ip, container_network, host_interface)
+        network.remove(custom_bridge, bridge_ip, container_network, host_interface or "")
         cleanup_container(
             unshare_pid,
             image_arg,
@@ -285,7 +286,7 @@ def create(
         logger.info("Container management process finished.")
 
 
-def get_parent_pid_of_shell():
+def get_parent_pid_of_shell() -> int:
     unshare_pid = 0
     pid_list_raw = command.run_on_host(
         ["pgrep", "-f", "/bin/sh -i"], pipe_output=True, check_error=False
@@ -308,12 +309,12 @@ def remove(
     custom_bridge: str,
     bridge_ip: str,
     container_network: str,
-    host_interface: str,
+    host_interface: Optional[str],
     control_groups: Path,
-):
+) -> None:
     """Main function to remove all resources."""
     unshare_pid = get_parent_pid_of_shell()
-    network.remove(custom_bridge, bridge_ip, container_network, host_interface)
+    network.remove(custom_bridge, bridge_ip, container_network, host_interface or "")
     cleanup_container(
         unshare_pid,
         image_arg,
@@ -326,7 +327,7 @@ def remove(
     logger.info("Full resource cleanup complete.")
 
 
-def parse_args():
+def parse_args() -> argparse.Namespace:
     """
     Parses command-line arguments using argparse for 'run' and 'rm' actions.
     """

@@ -3,12 +3,13 @@ import http.client
 import urllib.parse
 import ssl
 import logging
+from typing import Dict, Optional, Tuple
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
 
 
-def request(host, url, method="GET", headers={}, save_path=None):
+def request(host: str, url: str, method: str = "GET", headers: Optional[Dict[str, str]] = None, save_path: Optional[str] = None) -> Tuple[Optional[str], Optional[int]]:
     """
     General function for performing HTTP/HTTPS requests with manual redirect handling (3xx).
     Logic copied from DockerPuller._make_request.
@@ -31,7 +32,7 @@ def request(host, url, method="GET", headers={}, save_path=None):
             conn = http.client.HTTPSConnection(current_host, context=context)
 
             # KEY LOGIC FROM YOUR CLASS: Removing the Authorization header after the first redirect
-            req_headers = headers.copy()
+            req_headers = (headers or {}).copy()
             if redirect_count > 0 and "Authorization" in req_headers:
                 # After redirecting to the storage server (blobs), authorization is often built into the link
                 del req_headers["Authorization"]

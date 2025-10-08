@@ -32,6 +32,7 @@ This project uses a `Makefile` to provide simple and consistent commands for com
 *   A Linux operating system (assuming `cgroups v2`).
 *   `make` and `sudo` privileges.
 *   Required tools (must be in your system's PATH): **`iproute2`**, **`iptables`**, **`unshare`**, **`tar`**, and **`python3`** with standard libraries.
+*   **`mypy`** installed in virtual environment for type checking (optional).
 
 ### 1. Running a Container
 
@@ -43,7 +44,6 @@ make run
 ```
 
 **Run with a specific image:**
-You can specify the image name directly after the `run` command.
 ```bash
 make run ubuntu:latest
 ```
@@ -61,7 +61,14 @@ To run the suite of unit tests for this project, use the `make test` command:
 make test
 ```
 
-### 3. Manual Cleanup
+### 3. Type Checking
+
+To run mypy type checking on the source code:
+```bash
+make mypy
+```
+
+### 4. Manual Cleanup
 
 The cleanup process is automatically run when you exit the container's shell. If the script terminates unexpectedly, you can manually run the `make rm` command to remove leftover resources.
 

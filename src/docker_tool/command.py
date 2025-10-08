@@ -18,19 +18,20 @@ def run_on_host(
 ) -> Optional[str]:
     """Helper function to execute shell commands using subprocess."""
     try:
+        stdin_data = None
         if input_data:
             # If input_data is provided, it's passed via stdin
-            input_data = (input_data.encode("utf-8"),)
+            stdin_data = input_data.encode("utf-8")
         process = subprocess.run(
             cmd,
-            input=input_data,
+            input=stdin_data,
             capture_output=pipe_output,
             check=check_error,
             text=True,
             stderr=subprocess.DEVNULL if ignore_stderr else None,
         )
         if pipe_output and process.stdout:
-            return process.stdout.strip()
+            return str(process.stdout.strip())
         return None
     except subprocess.CalledProcessError as e:
         if check_error:
