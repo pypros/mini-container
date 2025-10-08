@@ -25,42 +25,49 @@ The script now **automatically determines and configures** the network settings,
 
 ## Usage Instructions
 
-The script handles all container creation, network setup, and cleanup in a single Python file, simplifying the usage compared to the original two-script setup.
+This project uses a `Makefile` to provide simple and consistent commands for common actions.
 
 ### Prerequisites
 
-* A Linux operating system (assuming `cgroups v2`).
-* Administrative privileges (`sudo`).
-* Required tools (must be in your system's PATH): **`iproute2`**, **`iptables`**, **`unshare`**, **`tar`**, and **`python3`** with standard libraries.
+*   A Linux operating system (assuming `cgroups v2`).
+*   `make` and `sudo` privileges.
+*   Required tools (must be in your system's PATH): **`iproute2`**, **`iptables`**, **`unshare`**, **`tar`**, and **`python3`** with standard libraries.
 
-### 1. Running a Container (`run` command)
+### 1. Running a Container
 
-The script will download the image, set up cgroups, launch the isolated process, configure the network, and drop you into an interactive shell.
+To download an image and run the container, use the `make run` command. You can specify a different image by using the `IMAGE` variable.
 
+**Run with the default image (alpine:latest):**
 ```bash
-sudo python3 docker.py run -it alpine:latest
+make run
 ```
 
- Argument | Description |
-| :--- | :--- |
-| `run` | Initiates the container creation and launch sequence. |
-| `-it` | Runs the container interactively (currently mandatory for this script). |
-| `alpine:latest` | The target Docker image (defaults to `alpine:latest`). |
+**Run with a specific image:**
+```bash
+make run IMAGE=ubuntu:latest
+```
 
-**Inside the Container:**
 Once the final message appears (`Entering interactive shell...`), you are inside the container. You can test connectivity:
 ```sh
 ping 8.8.8.8
 exit # Type exit to quit the container and trigger cleanup
 ```
 
-### 2. Removing All Resources (`rm` command)
+### 2. Running Tests
 
-The cleanup process is automatically run when you exit the container's shell (`exit`). If the script terminates unexpectedly, you can manually run the `rm` command to remove leftover cgroups, network bridges, and files.
+To run the suite of unit tests for this project, use the `make test` command:
+```bash
+make test
+```
+
+### 3. Manual Cleanup
+
+The cleanup process is automatically run when you exit the container's shell. If the script terminates unexpectedly, you can manually run the `make rm` command to remove leftover resources.
 
 ```bash
-sudo python3 docker.py rm
+make rm
 ```
+
 ## Core Mechanics: How Isolation is Achieved
 
 ### Namespace Isolation (`unshare`)

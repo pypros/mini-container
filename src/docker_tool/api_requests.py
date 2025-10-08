@@ -7,6 +7,7 @@ import logging
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
 
+
 def request(host, url, method="GET", headers={}, save_path=None):
     """
     General function for performing HTTP/HTTPS requests with manual redirect handling (3xx).
@@ -81,4 +82,3 @@ def request(host, url, method="GET", headers={}, save_path=None):
         return None, None
 
     return None, None
-

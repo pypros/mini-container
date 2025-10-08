@@ -3,12 +3,13 @@ import shutil
 import json
 import tarfile
 import logging
-from requests import request
+from .api_requests import request
 from pathlib import Path
 
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
+
 
 def get_authorization_token(image):
     logger.info("1/8: Retrieving authorization token...")
@@ -27,6 +28,7 @@ def get_authorization_token(image):
         raise Exception("Failed to extract token.")
     logger.info("Token obtained successfully.")
     return token
+
 
 def get_manifest_list_and_digest(image, tag, architecture, token):
     logger.info(
@@ -54,9 +56,10 @@ def get_manifest_list_and_digest(image, tag, architecture, token):
     logger.info(f"Digest found for {architecture}: {digest}")
     return digest
 
+
 def download_manifest(image, digest, token, build_temp_dir):
     logger.info("4/8: Downloading the actual image manifest using the digest...")
-    manifest_path = os.path.join(build_temp_dir, "manifest.json")
+    manifest_path = build_temp_dir / "manifest.json"
     host = "registry-1.docker.io"
     url = f"/v2/{image}/manifests/{digest}"
     headers = {
@@ -76,7 +79,7 @@ def download_manifest(image, digest, token, build_temp_dir):
     layer_digests = [layer["digest"] for layer in manifest_data.get("layers", [])]
 
     # Optionally saving the list of digests to a file (as in DockerPuller, for order)
-    blobs_list_path = os.path.join(build_temp_dir, "blobs_list.txt")
+    blobs_list_path = build_temp_dir / "blobs_list.txt"
     with open(blobs_list_path, "w") as f:
         for layer_digest in layer_digests:
             f.write(f"{layer_digest}\n")
@@ -91,15 +94,17 @@ def download_manifest(image, digest, token, build_temp_dir):
     )
     return layer_digests, config_digest
 
-def download_layers(token, image, layer_digests, image_layers_dir):
+
+def download_layers(token, image, layer_digests, image_layers_dir: Path):
     logger.info("5/8: Downloading layers (blobs)...")
-    os.makedirs(image_layers_dir, exist_ok=True)
+    image_layers_dir.mkdir(parents=True, exist_ok=True)
     host = "registry-1.docker.io"
     download_count = 0
     for blob_sum in layer_digests:
         hash_part = blob_sum.split(":", 1)[1]
         logger.info(f"   -> Downloading: {blob_sum}...")
-        layer_path = os.path.join(image_layers_dir, f"{hash_part}.tar.gz")
+        layer_path = image_layers_dir / f"{hash_part}.tar.gz"
+
         url = f"/v2/{image}/blobs/{blob_sum}"
         headers = {"Authorization": f"Bearer {token}"}
 
@@ -108,54 +113,50 @@ def download_layers(token, image, layer_digests, image_layers_dir):
         if status == 200:
             download_count += 1
         else:
-            raise Exception(
-                f"Failed to download layer {blob_sum}. Status: {status}"
-            )
+            raise Exception(f"Failed to download layer {blob_sum}. Status: {status}")
     logger.info(
         f"Successfully downloaded {download_count} layers to {image_layers_dir}."
     )
     return True
 
+
 def download_config(
-        token,
-        image,
-        config_digest,
-        build_temp_dir,
-    ):
+    token,
+    image,
+    config_digest,
+    build_temp_dir: Path,
+):
     logger.info("6/8: Downloading the configuration file...")
     config_filename = config_digest.split(":", 1)[1]
-    config_output_path = os.path.join(build_temp_dir, f"{config_filename}.json")
+    config_output_path = build_temp_dir / f"{config_filename}.json"
     config_filename_short = f"{config_filename}.json"
     host = "registry-1.docker.io"
     url = f"/v2/{image}/blobs/{config_digest}"
     headers = {"Authorization": f"Bearer {token}"}
 
     # Use _make_request, which handles redirects and removes the header
-    result, status = request(
-        host, url, headers=headers, save_path=config_output_path
-    )
+    result, status = request(host, url, headers=headers, save_path=config_output_path)
     if status != 200:
         raise Exception(f"Failed to download configuration file. Status: {status}")
     logger.info(f"Configuration file saved as {config_output_path}.")
     return config_output_path, config_filename_short
 
+
 def assemble_tar_archive(
     image,
-    tag, 
+    tag,
     full_image_arg,
     config_output_path,
     config_filename_short,
     layer_digests,
-    compose_dir,
-    image_layers_dir,
+    compose_dir: Path,
+    image_layers_dir: Path,
 ):
     logger.info("7/8: Assembling the image into a .tar archive...")
-    os.makedirs(compose_dir, exist_ok=True)
+    compose_dir.mkdir(parents=True, exist_ok=True)
 
     # 1. Move the configuration file (we remove it from build_temp_dir)
-    shutil.move(
-        config_output_path, os.path.join(compose_dir, config_filename_short)
-    )
+    shutil.move(config_output_path, compose_dir / config_filename_short)
 
     layer_paths_for_manifest = []
 
@@ -163,15 +164,15 @@ def assemble_tar_archive(
     for blob_sum in layer_digests:
         hash_part = blob_sum.split(":", 1)[1]
 
-        tar_gz_path = os.path.join(image_layers_dir, f"{hash_part}.tar.gz")
-        compose_tar_path = os.path.join(compose_dir, f"{hash_part}.tar")
+        tar_gz_path = image_layers_dir / f"{hash_part}.tar.gz"
+        compose_tar_path = compose_dir / f"{hash_part}.tar"
         layer_paths_for_manifest.append(f"{hash_part}.tar")
 
         # Copy of the compressed file, but with a *.tar name
         shutil.copyfile(tar_gz_path, compose_tar_path)
 
         # Add the VERSION file (as in DockerPuller)
-        with open(os.path.join(compose_dir, f"{hash_part}.tar.version"), "w") as f:
+        with open(compose_dir / f"{hash_part}.tar.version", "w") as f:
             f.write("1.0\n")
 
     # 3. Create manifest.json
@@ -182,24 +183,21 @@ def assemble_tar_archive(
         "Layers": [ {layer_paths_json} ]
     }} ]"""
 
-    with open(os.path.join(compose_dir, "manifest.json"), "w") as manifest:
+    with open(compose_dir / "manifest.json", "w") as manifest:
         manifest.write(catalog_manifest)
 
     # 4. Packaging into an archive
-    final_tar_name = (
-        f"{full_image_arg.replace('/', '_').replace(':', '_')}_loaded.tar"
-    )
+    final_tar_name = f"{full_image_arg.replace('/', '_').replace(':', '_')}_loaded.tar"
 
     with tarfile.open(final_tar_name, "w") as tar:
         for item in os.listdir(compose_dir):
-            tar.add(os.path.join(compose_dir, item), arcname=item)
+            tar.add(Path(compose_dir) / item, arcname=item)
 
     logger.info(f"Image assembled into {final_tar_name}.")
     return final_tar_name
 
-def extract_rootfs(
-    layer_digests, image_layers_dir, container_root
-):
+
+def extract_root_file_system(layer_digests, image_layers_dir, container_root):
     logger.info(
         f"8/8: Extracting layers into a complete root filesystem in {container_root}..."
     )
@@ -210,7 +208,7 @@ def extract_rootfs(
     extraction_count = 0
     for blob_sum in layer_digests:
         hash_part = blob_sum.split(":", 1)[1]
-        layer_tar_gz = os.path.join(image_layers_dir, f"{hash_part}.tar.gz")
+        layer_tar_gz = image_layers_dir / f"{hash_part}.tar.gz"
 
         logger.info(f"   -> Extracting layer: {hash_part[:10]}...")
 
@@ -225,28 +223,28 @@ def extract_rootfs(
     )
 
 
-def cleanup_download_artifacts(container_root, build_temp_dir, image_layers_dir, compose_dir):
+def cleanup_download_artifacts(
+    container_root, build_temp_dir, image_layers_dir, compose_dir
+):
     """Removes temporary directories after image download and extraction."""
     for directory in [container_root, build_temp_dir, image_layers_dir, compose_dir]:
         if os.path.isdir(directory):
             try:
                 shutil.rmtree(directory)
             except OSError as e:
-                logger.error(
-                    f"Error cleaning download artifacts {directory}: {e}"
-                )  # Błąd czyszczenia artefaktów pobierania
+                logger.error(f"Error cleaning download artifacts {directory}: {e}")
 
 
 def download_image(
-        full_image_arg: str,
-        image: str,
-        tag:str,
-        architecture: str,
-        build_temp_dir: Path,
-        image_layers_dir: Path,
-        container_root: Path,
-        compose_dir: Path,
-    ):
+    full_image_arg: str,
+    image: str,
+    tag: str,
+    architecture: str,
+    build_temp_dir: Path,
+    image_layers_dir: Path,
+    container_root: Path,
+    compose_dir: Path,
+):
     """
     Downloads a Docker image (v2 Registry API) using proven logic from the
     DockerPuller class (manual redirect handling and token removal for S3).
@@ -260,13 +258,14 @@ def download_image(
         f"--- Starting manual pull of image {image}:{tag} ({architecture}) using pure Python ---"
     )
 
-
     try:
-        os.makedirs(build_temp_dir, exist_ok=True)  # Creating the main temp directory
+        build_temp_dir.mkdir(parents=True, exist_ok=True)
 
         token = get_authorization_token(image)
         digest = get_manifest_list_and_digest(image, tag, architecture, token)
-        layer_digests, config_digest = download_manifest(image, digest, token, build_temp_dir)
+        layer_digests, config_digest = download_manifest(
+            image, digest, token, build_temp_dir
+        )
         is_downloaded_layers = download_layers(
             token, image, layer_digests, image_layers_dir
         )
@@ -274,16 +273,19 @@ def download_image(
             token, image, config_digest, build_temp_dir
         )
         final_tar_name = assemble_tar_archive(
-            image, tag, full_image_arg, config_output_path, config_filename_short, layer_digests, compose_dir, image_layers_dir,
+            image,
+            tag,
+            full_image_arg,
+            config_output_path,
+            config_filename_short,
+            layer_digests,
+            compose_dir,
+            image_layers_dir,
         )
-        extract_rootfs(layer_digests, image_layers_dir, container_root)
+        extract_root_file_system(layer_digests, image_layers_dir, container_root)
 
         # cleanup_download_artifacts()
 
     except Exception as e:
         logger.critical(f"\nDuring pull process: {e}")
         cleanup_download_artifacts()
-
-
-
-# --- Main sequence (Replaces pull_image) ---
