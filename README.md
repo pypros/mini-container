@@ -32,7 +32,13 @@ This project uses a `Makefile` to provide simple and consistent commands for com
 *   A Linux operating system (assuming `cgroups v2`).
 *   `make` and `sudo` privileges.
 *   Required tools (must be in your system's PATH): **`iproute2`**, **`iptables`**, **`unshare`**, **`tar`**, and **`python3`** with standard libraries.
-*   **`mypy`** and **`ruff`** installed in virtual environment for type checking and linting (optional).
+
+### Setup
+
+Install development dependencies:
+```bash
+make install
+```
 
 ### 1. Running a Container
 
@@ -81,6 +87,13 @@ The cleanup process is automatically run when you exit the container's shell. If
 
 ```bash
 make rm
+```
+
+### 6. Development
+
+Clean up all build artifacts and cache:
+```bash
+make clean
 ```
 
 ## Core Mechanics: How Isolation is Achieved

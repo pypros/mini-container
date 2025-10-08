@@ -1,4 +1,4 @@
-.PHONY: run test rm mypy lint
+.PHONY: run test rm mypy lint install clean
 
 IMAGE ?= alpine:latest
 
@@ -39,5 +39,23 @@ rm:
 	echo "--- Cleaning up resources ---"; \
 	sudo python3 -m src.docker_tool.docker rm $$ARGS
 
-%:
-	@:
+# Install development dependencies
+install:
+	@echo "--- Installing development dependencies ---"
+	python3 -m venv venv
+	venv/bin/pip install -r requirements.txt
+
+# Clean up build artifacts and cache
+clean:
+	@echo "--- Cleaning up ---"
+	rm -rf venv/ .mypy_cache/ .ruff_cache/
+	find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+	find . -name "*.pyc" -delete 2>/dev/null || true
+	find . -name "*.pyo" -delete 2>/dev/null || true
+	find . -name "*.pyd" -delete 2>/dev/null || true
+	find . -name ".coverage" -delete 2>/dev/null || true
+	find . -name "*.cover" -delete 2>/dev/null || true
+	find . -name "*.log" -delete 2>/dev/null || true
+	rm -rf *.tar my_image_root/ .docker_temp/
+	rm -rf build/ dist/ *.egg-info/
+	rm -rf .pytest_cache/ .tox/ htmlcov/

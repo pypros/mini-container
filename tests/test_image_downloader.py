@@ -133,7 +133,7 @@ class TestImageDownloader(unittest.TestCase):
                 "registry-1.docker.io",
                 f"/v2/{self.image}/blobs/{digest}",
                 headers={"Authorization": f"Bearer {self.token}"},
-                save_path=layer_path
+                save_path=str(layer_path)
             ))
         mock_request.assert_has_calls(calls, any_order=True)
 
