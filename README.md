@@ -35,7 +35,7 @@ This project uses a `Makefile` to provide simple and consistent commands for com
 
 ### 1. Running a Container
 
-To download an image and run the container, use the `make run` command. You can specify a different image by using the `IMAGE` variable.
+To download an image and run the container, use the `make run` command.
 
 **Run with the default image (alpine:latest):**
 ```bash
@@ -43,8 +43,9 @@ make run
 ```
 
 **Run with a specific image:**
+You can specify the image name directly after the `run` command.
 ```bash
-make run IMAGE=ubuntu:latest
+make run ubuntu:latest
 ```
 
 Once the final message appears (`Entering interactive shell...`), you are inside the container. You can test connectivity:

@@ -3,10 +3,9 @@
 IMAGE ?= alpine:latest
 
 # Run the container
-# Usage: make run IMAGE=ubuntu:latest
+# Usage: make run [image-name] (e.g., make run ubuntu:latest)
 run:
-	@echo "--- Running Container ---"
-	sudo python3 -m src.docker_tool.docker run -it $(IMAGE)
+	@{ 		ARGS="$(filter-out $@,$(MAKECMDGOALS))"; 		if [ -z "$ARGS" ]; then 			ARGS="$(IMAGE)"; 		fi; 		echo "--- Running Container ---"; 		sudo python3 -m src.docker_tool.docker run -it $ARGS; 	}
 
 # Run all tests
 test:
