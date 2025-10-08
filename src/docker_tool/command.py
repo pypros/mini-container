@@ -1,21 +1,19 @@
+import logging
 import subprocess
 import sys
-from typing import List, Optional
 from pathlib import Path
-import logging
-
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
 
 
 def run_on_host(
-    cmd: List[str],
+    cmd: list[str],
     pipe_output: bool = False,
-    input_data: Optional[str] = None,
+    input_data: str | None = None,
     check_error: bool = True,
     ignore_stderr: bool = False,
-) -> Optional[str]:
+) -> str | None:
     """Helper function to execute shell commands using subprocess."""
     try:
         stdin_data = None
@@ -44,9 +42,7 @@ def run_on_host(
         sys.exit(1)
 
 
-def run_on_container(
-    container_pid: int, cmd: str, container_root: Path
-) -> Optional[str]:
+def run_on_container(container_pid: int, cmd: str, container_root: Path) -> str | None:
     """
     Executes a shell command or a multi-command string inside the container's
     isolated namespaces (mount, net, uts) using nsenter.

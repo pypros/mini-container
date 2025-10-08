@@ -1,18 +1,16 @@
-import subprocess
-import os
-import signal
-import time
-import sys
-import shutil
-from pathlib import Path
 import argparse
-import re
+import contextlib
 import logging
-from typing import Tuple, Optional
-from . import image_downloader
-from . import command
-from . import network
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
 
+from . import command, image_downloader, network
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
@@ -20,32 +18,29 @@ logger = logging.getLogger(__name__)
 
 def get_arch() -> str:
     """Determines system architecture for Docker manifest using a dictionary lookup."""
-    ARCHITECTURE_MAP = {
+    architectures = {
         "x86_64": "amd64",
         "aarch64": "arm64",
         "arm": "arm",
         "armv7l": "arm",
     }
     uname_arch = command.run_on_host(["uname", "-m"], pipe_output=True)
-    docker_arch = ARCHITECTURE_MAP.get(uname_arch or "", "amd64")
-    if docker_arch == "amd64" and uname_arch not in ARCHITECTURE_MAP:
+    docker_arch = architectures.get(uname_arch or "", "amd64")
+    if docker_arch == "amd64" and uname_arch not in architectures:
         logger.warning(
             f"Unknown system architecture ({uname_arch}). Using default: amd64."
         )
     return docker_arch
 
 
-def parse_image(full_image_arg: str) -> Tuple[str, str]:
+def parse_image(full_image_arg: str) -> tuple[str, str]:
     if ":" not in full_image_arg:
         image_name = full_image_arg
         tag = "latest"
     else:
         image_name, tag = full_image_arg.split(":", 1)
 
-    if "/" not in image_name:
-        name = f"library/{image_name}"
-    else:
-        name = image_name
+    name = f"library/{image_name}" if "/" not in image_name else image_name
 
     return name, tag
 
@@ -203,7 +198,7 @@ def create(
         export HOME=/root
         export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
         export TERM=xterm
-        
+
         # 5. Execute the shell
         exec /bin/sh -i;
     """
@@ -267,13 +262,14 @@ def create(
 
     except Exception as e:
         logger.critical(f"During configuration or runtime: {e}")
-        try:
-            os.kill(unshare_pid, signal.SIGKILL)
-        except:
-            pass
+        with contextlib.suppress(ProcessLookupError, PermissionError):
+            os.killpg(os.getpgid(unshare_pid), signal.SIGTERM)
+
     finally:
         logger.info("6. Initiating cleanup...")
-        network.remove(custom_bridge, bridge_ip, container_network, host_interface or "")
+        network.remove(
+            custom_bridge, bridge_ip, container_network, host_interface or ""
+        )
         cleanup_container(
             unshare_pid,
             image_arg,
@@ -296,10 +292,7 @@ def get_parent_pid_of_shell() -> int:
         unshare_pid_raw = command.run_on_host(
             ["ps", "-o", "ppid=", "-p", init_pid], pipe_output=True, check_error=False
         )
-        if unshare_pid_raw:
-            unshare_pid = int(unshare_pid_raw.strip())
-        else:
-            unshare_pid = 0
+        unshare_pid = int(unshare_pid_raw.strip()) if unshare_pid_raw else 0
     return unshare_pid
 
 
@@ -309,7 +302,7 @@ def remove(
     custom_bridge: str,
     bridge_ip: str,
     container_network: str,
-    host_interface: Optional[str],
+    host_interface: str | None,
     control_groups: Path,
 ) -> None:
     """Main function to remove all resources."""

@@ -1,12 +1,11 @@
-import sys
-import re
-import logging
 import ipaddress
+import logging
 import random
+import re
+import sys
 from pathlib import Path
-from typing import Set, Dict, Optional
-from . import command
 
+from . import command
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
@@ -18,9 +17,9 @@ class NetworkGenerationError(RuntimeError):
     pass
 
 
-def get_used_subnets() -> Set[ipaddress.IPv4Network]:
+def get_used_subnets() -> set[ipaddress.IPv4Network]:
     """Retrieves a list of all subnets used on the host based on the routing table."""
-    used_subnets: Set[ipaddress.IPv4Network] = set()
+    used_subnets: set[ipaddress.IPv4Network] = set()
     # Show all routes in CIDR format
     route_output = command.run_on_host(
         ["ip", "route", "show"], pipe_output=True, check_error=False
@@ -49,17 +48,17 @@ def get_used_subnets() -> Set[ipaddress.IPv4Network]:
     return used_subnets
 
 
-def generate_network_config() -> Dict[str, str]:
+def generate_network_config() -> dict[str, str]:
     """
     Generates a unique set of IP addresses that does not conflict with active host networks.
     Picks a random, private /16 subnet from the 172.16.0.0/12 range.
     """
 
     used_subnets = get_used_subnets()
-    MAX_TRIES = 5
+    max_tries = 5
 
     # Private Class B range is 172.16.0.0/12, spanning 172.16.x.x to 172.31.x.x
-    for _ in range(MAX_TRIES):
+    for _ in range(max_tries):
         # 1. Randomly select the second octet (16 to 31)
         random_second_octet = random.randint(16, 31)
         network_base = f"172.{random_second_octet}.0.0/16"
@@ -93,12 +92,12 @@ def generate_network_config() -> Dict[str, str]:
                 "container_ip": f"{container_ip_full}/{new_net.prefixlen}",
             }
     raise NetworkGenerationError(
-        f"Can't to find a free /16 subnet in the 172.16.0.0/12 range after {MAX_TRIES} attempts. "
+        f"Can't to find a free /16 subnet in the 172.16.0.0/12 range after {max_tries} attempts. "
         "Check the active network configuration (e.g., Docker, VPN, bridges) on the host."
     )
 
 
-def host_interface(custom_bridge: str) -> Optional[str]:
+def host_interface(custom_bridge: str) -> str | None:
     route_output = command.run_on_host(
         ["ip", "route", "show", "default"], pipe_output=True, check_error=True
     )
@@ -131,8 +130,7 @@ def create(
     gateway_ip = bridge_ip.split("/")[0]
 
     logger.info("1/8: Enabling IP Forwarding...")
-    IP_FORWARD_PATH = "/proc/sys/net/ipv4/ip_forward"
-    command.run_on_host(["echo", "1", ">", IP_FORWARD_PATH])
+    command.run_on_host(["echo", "1", ">", "/proc/sys/net/ipv4/ip_forward"])
 
     logger.info("2/8: Creating Bridge and assigning IP...")
     command.run_on_host(
@@ -227,7 +225,7 @@ def create(
         resolv_conf = etc / "resolv.conf"
         resolv_conf.parent.mkdir(parents=True, exist_ok=True)
         with open(resolv_conf, "w") as f:
-            f.write("nameserver 8.8.8.8\n" "nameserver 1.1.1.1\n")
+            f.write("nameserver 8.8.8.8\nnameserver 1.1.1.1\n")
     except Exception as e:
         logger.error(f"Error writing resolv.conf: {e}")
         sys.exit(1)

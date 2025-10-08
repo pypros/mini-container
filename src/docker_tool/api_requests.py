@@ -1,25 +1,30 @@
-import shutil
 import http.client
-import urllib.parse
-import ssl
 import logging
-from typing import Dict, Optional, Tuple
+import shutil
+import ssl
+import urllib.parse
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
 
 
-def request(host: str, url: str, method: str = "GET", headers: Optional[Dict[str, str]] = None, save_path: Optional[str] = None) -> Tuple[Optional[str], Optional[int]]:
+def request(
+    host: str,
+    url: str,
+    method: str = "GET",
+    headers: dict[str, str] | None = None,
+    save_path: str | None = None,
+) -> tuple[str | None, int | None]:
     """
     General function for performing HTTP/HTTPS requests with manual redirect handling (3xx).
     Logic copied from DockerPuller._make_request.
     """
-    MAX_REDIRECTS = 5
+    max_redirects = 5
     redirect_count = 0
     current_host = host
     current_url = url
 
-    while redirect_count < MAX_REDIRECTS:
+    while redirect_count < max_redirects:
         conn = None
         try:
             parsed_url = urllib.parse.urlparse(f"https://{current_host}{current_url}")
@@ -78,7 +83,7 @@ def request(host: str, url: str, method: str = "GET", headers: Optional[Dict[str
             if conn:
                 conn.close()
 
-    if redirect_count == MAX_REDIRECTS:
+    if redirect_count == max_redirects:
         logger.error("Maximum redirect limit reached.")
         return None, None
 

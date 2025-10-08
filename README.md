@@ -32,7 +32,7 @@ This project uses a `Makefile` to provide simple and consistent commands for com
 *   A Linux operating system (assuming `cgroups v2`).
 *   `make` and `sudo` privileges.
 *   Required tools (must be in your system's PATH): **`iproute2`**, **`iptables`**, **`unshare`**, **`tar`**, and **`python3`** with standard libraries.
-*   **`mypy`** installed in virtual environment for type checking (optional).
+*   **`mypy`** and **`ruff`** installed in virtual environment for type checking and linting (optional).
 
 ### 1. Running a Container
 
@@ -68,7 +68,14 @@ To run mypy type checking on the source code:
 make mypy
 ```
 
-### 4. Manual Cleanup
+### 4. Code Linting
+
+To run ruff linting and formatting on the source code:
+```bash
+make lint
+```
+
+### 5. Manual Cleanup
 
 The cleanup process is automatically run when you exit the container's shell. If the script terminates unexpectedly, you can manually run the `make rm` command to remove leftover resources.
 

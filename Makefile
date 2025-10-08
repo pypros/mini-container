@@ -1,4 +1,4 @@
-.PHONY: run test rm mypy
+.PHONY: run test rm mypy lint
 
 IMAGE ?= alpine:latest
 
@@ -21,6 +21,13 @@ test:
 mypy:
 	@echo "--- Running mypy type checking ---"
 	venv/bin/mypy src/
+
+# Run ruff linting and formatting
+lint:
+	@echo "--- Running ruff linting ---"
+	venv/bin/ruff check --fix src/
+	venv/bin/ruff format src/
+	venv/bin/ruff check src/
 
 # Clean up leftover resources
 # This is a manual cleanup command.
