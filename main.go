@@ -9,28 +9,46 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/urfave/cli/v2"
+
+	"container-manager/pkg/command"
 	"container-manager/pkg/downloader"
 	"container-manager/pkg/network"
 )
 
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Println("Usage: go run main.go run [image]")
-		os.Exit(1)
+	app := &cli.App{
+		Name:  "container-manager",
+		Usage: "Educational Linux containerization tool",
+		Commands: []*cli.Command{
+			{
+				Name:  "run",
+				Usage: "Run a container",
+				Flags: []cli.Flag{
+					&cli.StringFlag{
+						Name:  "image",
+						Value: "alpine:latest",
+						Usage: "Container image to run",
+					},
+				},
+				Action: func(c *cli.Context) error {
+					runContainer(c.String("image"))
+					return nil
+				},
+			},
+			{
+				Name:  "rm",
+				Usage: "Cleanup resources",
+				Action: func(c *cli.Context) error {
+					cleanup()
+					return nil
+				},
+			},
+		},
 	}
 
-	switch os.Args[1] {
-	case "run":
-		image := "alpine:latest"
-		if len(os.Args) > 2 {
-			image = os.Args[2]
-		}
-		runContainer(image)
-	case "rm":
-		cleanup()
-
-	default:
-		fmt.Println("Unknown command:", os.Args[1])
+	if err := app.Run(os.Args); err != nil {
+		fmt.Printf("Error: %v\n", err)
 		os.Exit(1)
 	}
 }
@@ -77,15 +95,23 @@ func runContainer(imageArg string) {
 
 	// Setup cgroups
 	cgroupPath := "/sys/fs/cgroup/my_custom_container"
-	os.MkdirAll(cgroupPath, 0755)
-	os.WriteFile(filepath.Join(cgroupPath, "memory.max"), []byte("256M"), 0644)
-	os.WriteFile(filepath.Join(cgroupPath, "cpu.max"), []byte("50000 100000"), 0644)
+	if err := os.MkdirAll(cgroupPath, 0755); err != nil {
+		fmt.Printf("Failed to create cgroup directory: %v\n", err)
+	}
+	if err := os.WriteFile(filepath.Join(cgroupPath, "memory.max"), []byte("256M"), 0644); err != nil {
+		fmt.Printf("Failed to set memory limit: %v\n", err)
+	}
+	if err := os.WriteFile(filepath.Join(cgroupPath, "cpu.max"), []byte("50000 100000"), 0644); err != nil {
+		fmt.Printf("Failed to set CPU limit: %v\n", err)
+	}
 
 	// Mount /dev using syscall
 	devPath := filepath.Join(containerRoot, "dev")
 	if err := syscall.Mount("none", devPath, "devtmpfs", 0, ""); err != nil {
 		fmt.Printf("Warning: failed to mount /dev: %v\n", err)
 	}
+
+	fmt.Println("Starting container...")
 
 	// Start simple shell in container
 	cmd := exec.Command("/bin/sh", "-i")
@@ -105,38 +131,44 @@ func runContainer(imageArg string) {
 	}
 
 	pid := cmd.Process.Pid
-	fmt.Printf("Container PID: %d\n", pid)
 
 	// Find actual container PID (child process in new PID namespace)
 	containerPID := findContainerPID(pid)
-	fmt.Printf("Container PID children: %d\n", pid)
 	if containerPID != 0 {
-		fmt.Printf("Found container child PID: %d\n", containerPID)
 		pid = containerPID
 	}
 
 	// Add to cgroup
-	os.WriteFile(filepath.Join(cgroupPath, "cgroup.procs"), []byte(strconv.Itoa(pid)), 0644)
+	if err := os.WriteFile(filepath.Join(cgroupPath, "cgroup.procs"), []byte(strconv.Itoa(pid)), 0644); err != nil {
+		fmt.Printf("Failed to add process to cgroup: %v\n", err)
+	}
 
 	// Configure container namespace using nsenter
 	go configureContainerNamespace(pid, containerRoot)
 
 	// Setup network
-	network.Create(pid, customBridge, containerRoot, netConfig.BridgeIP, netConfig.ContainerNetwork, netConfig.ContainerIP, hostIface)
+	go func() {
+		if err := network.Create(pid, customBridge, containerRoot, netConfig.BridgeIP, netConfig.ContainerNetwork, netConfig.ContainerIP, hostIface); err != nil {
+			fmt.Printf("Network setup failed: %v\n", err)
+		}
+	}()
 
-	fmt.Println("Container started. Type 'exit' to quit.")
-	cmd.Wait()
+	if err := cmd.Wait(); err != nil {
+		fmt.Printf("Container exited with error: %v\n", err)
+	}
 
 	// Cleanup
-	network.Remove(customBridge, netConfig.BridgeIP, netConfig.ContainerNetwork, hostIface)
+	if err := network.Remove(customBridge, netConfig.BridgeIP, netConfig.ContainerNetwork, hostIface); err != nil {
+		fmt.Printf("Network cleanup failed: %v\n", err)
+	}
 	cleanupContainer(pid, cgroupPath, containerRoot)
 }
 
 func cleanupContainer(pid int, cgroupPath, containerRoot string) {
 	// Unmount filesystems using syscalls (ignore errors)
-	syscall.Unmount(filepath.Join(containerRoot, "dev"), 0)
-	syscall.Unmount(filepath.Join(containerRoot, "proc"), 0)
-	syscall.Unmount(filepath.Join(containerRoot, "sys"), 0)
+	_ = syscall.Unmount(filepath.Join(containerRoot, "dev"), 0)
+	_ = syscall.Unmount(filepath.Join(containerRoot, "proc"), 0)
+	_ = syscall.Unmount(filepath.Join(containerRoot, "sys"), 0)
 
 	// Remove directories
 	os.RemoveAll(containerRoot)
@@ -169,10 +201,18 @@ func findContainerPID(parentPID int) int {
 }
 
 func configureContainerNamespace(pid int, containerRoot string) {
-	// Mount proc and sys using nsenter
-	exec.Command("nsenter", "-t", strconv.Itoa(pid), "-m", "mount", "-t", "proc", "proc", "/proc").Run()
-	exec.Command("nsenter", "-t", strconv.Itoa(pid), "-m", "mount", "-t", "sysfs", "sys", "/sys").Run()
-	exec.Command("nsenter", "-t", strconv.Itoa(pid), "-u", "hostname", "my-container").Run()
+	// Mount namespace
+	_ = command.RunInNamespace(pid, syscall.CLONE_NEWNS, func() error {
+		_ = syscall.Mount("proc", "/proc", "proc", 0, "")
+		_ = syscall.Mount("sys", "/sys", "sysfs", 0, "")
+		return nil
+	})
+
+	// UTS namespace for hostname
+	_ = command.RunInNamespace(pid, syscall.CLONE_NEWUTS, func() error {
+		_ = syscall.Sethostname([]byte("my-container"))
+		return nil
+	})
 }
 
 func cleanup() {

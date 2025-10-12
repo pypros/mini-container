@@ -13,21 +13,38 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     
-    - name: Set up Python
-      uses: actions/setup-python@v4
+    - name: Set up Go 1.21
+      uses: actions/setup-go@v4
       with:
-        python-version: '3.12'
+        go-version: '1.21'
     
-    - name: Install dependencies
-      run: |
-        python -m venv venv
-        venv/bin/pip install -r requirements.txt
-    
-    - name: Run type checking
-      run: make mypy
-    
-    - name: Run linting
-      run: make lint
+    - name: Download dependencies
+      run: go mod download
     
     - name: Run tests
-      run: make test
+      run: go test -v ./...
+    
+    - name: Run tests with coverage
+      run: go test -cover ./...
+    
+    - name: Build binary
+      run: go build -o container-manager
+    
+    - name: Verify binary
+      run: ./container-manager --help
+    
+    - name: Run go vet
+      run: go vet ./...
+    
+    - name: Run go fmt check
+      run: |
+        if [ "$(gofmt -s -l . | wc -l)" -gt 0 ]; then
+          echo "Code is not formatted properly:"
+          gofmt -s -l .
+          exit 1
+        fi
+    
+    - name: Run staticcheck
+      run: |
+        go install honnef.co/go/tools/cmd/staticcheck@latest
+        staticcheck ./...

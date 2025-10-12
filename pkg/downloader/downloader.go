@@ -64,8 +64,10 @@ func DownloadImage(image, tag, architecture, containerRoot string) error {
 	// 4. Download and extract layers
 	fmt.Println("5/8: Downloading layers (blobs)...")
 	tempDir := ".docker_temp/image_layers"
-	os.MkdirAll(tempDir, 0755)
-	
+	if err := os.MkdirAll(tempDir, 0755); err != nil {
+		return fmt.Errorf("failed to create temp directory: %v", err)
+	}
+
 	for _, digest := range layerDigests {
 		fmt.Printf("   -> Downloading: %s...\n", digest)
 		if err := downloadLayer(image, digest, token, tempDir); err != nil {
@@ -81,7 +83,7 @@ func DownloadImage(image, tag, architecture, containerRoot string) error {
 
 func getToken(image string) (string, error) {
 	url := fmt.Sprintf("/token?service=registry.docker.io&scope=repository:%s:pull", image)
-	
+
 	response, status, err := api.Request("auth.docker.io", url, "GET", nil, "")
 	if err != nil || status != 200 {
 		return "", fmt.Errorf("failed to get token: %v", err)
@@ -168,12 +170,14 @@ func downloadLayer(image, digest, token, tempDir string) error {
 
 func extractLayers(layerDigests []string, tempDir, containerRoot string) error {
 	os.RemoveAll(containerRoot)
-	os.MkdirAll(containerRoot, 0755)
+	if err := os.MkdirAll(containerRoot, 0755); err != nil {
+		return fmt.Errorf("failed to create container root: %v", err)
+	}
 
 	for _, digest := range layerDigests {
 		hashPart := digest[7:] // Remove "sha256:"
 		fmt.Printf("   -> Extracting layer: %s...\n", hashPart[:10])
-		
+
 		layerPath := filepath.Join(tempDir, hashPart+".tar.gz")
 		if err := extractTarGz(layerPath, containerRoot); err != nil {
 			return fmt.Errorf("failed to extract layer: %v", err)
@@ -212,17 +216,26 @@ func extractTarGz(filename, destination string) error {
 
 		switch header.Typeflag {
 		case tar.TypeDir:
-			os.MkdirAll(target, os.FileMode(header.Mode))
+			if err := os.MkdirAll(target, os.FileMode(header.Mode)); err != nil {
+				return fmt.Errorf("failed to create directory %s: %v", target, err)
+			}
 		case tar.TypeReg:
-			os.MkdirAll(filepath.Dir(target), 0755)
+			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+				return fmt.Errorf("failed to create parent directory: %v", err)
+			}
 			f, err := os.OpenFile(target, os.O_CREATE|os.O_RDWR, os.FileMode(header.Mode))
 			if err != nil {
 				return err
 			}
-			io.Copy(f, tr)
+			if _, err := io.Copy(f, tr); err != nil {
+				f.Close()
+				return fmt.Errorf("failed to copy file content: %v", err)
+			}
 			f.Close()
 		case tar.TypeSymlink:
-			os.Symlink(header.Linkname, target)
+			if err := os.Symlink(header.Linkname, target); err != nil {
+				return fmt.Errorf("failed to create symlink: %v", err)
+			}
 		}
 	}
 

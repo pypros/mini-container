@@ -62,7 +62,7 @@ func Request(host, path, method string, headers map[string]string, savePath stri
 				_, err = io.Copy(file, resp.Body)
 				return "File saved", resp.StatusCode, err
 			}
-			
+
 			body, err := io.ReadAll(resp.Body)
 			return string(body), resp.StatusCode, err
 		}
