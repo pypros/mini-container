@@ -98,6 +98,7 @@ func HostInterface(customBridge string) (string, error) {
 }
 
 func Create(containerPID int, customBridge, containerRoot, bridgeIP, containerNetwork, containerIP, hostInterface string) error {
+	fmt.Printf("Configuring network for PID %d\n", containerPID)
 	vethHost := fmt.Sprintf("h%d", containerPID)
 	vethGuest := fmt.Sprintf("c%d", containerPID)
 	gatewayIP := strings.Split(bridgeIP, "/")[0]
